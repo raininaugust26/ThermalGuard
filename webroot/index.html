@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0F1B21">
+    <title>ThermalGuard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+
+        <!-- ═══════════════════════════════════════════
+             HOME (Dashboard)
+             ═══════════════════════════════════════════ -->
+        <div id="screen-home" class="screen active">
+            <!-- Critical banner (hidden by default) -->
+            <div id="critical-banner" class="banner banner-critical hidden">
+                <div class="banner-content">
+                    <strong>Failsafe Active</strong>
+                    <span id="banner-msg">All tweaks removed. Defaults restored. Module locked for safety.</span>
+                </div>
+            </div>
+
+            <!-- Header -->
+            <header class="header">
+                <div class="header-left">
+                    <h1 class="app-title">ThermalGuard</h1>
+                    <span id="status-pill" class="pill pill-active">Active</span>
+                </div>
+                <div id="soc-badge" class="soc-badge">SoC</div>
+            </header>
+
+            <!-- Read-only warning -->
+            <div id="readonly-banner" class="banner banner-warn hidden">
+                <div class="banner-content">
+                    <strong>Read-Only Mode</strong>
+                    <span>This device is not fully supported. Monitoring works; active tweaks are disabled. Share logs to help add support.</span>
+                </div>
+                <button class="btn-sm" onclick="shareLogs()">Share Logs</button>
+            </div>
+
+            <!-- Temperature gauge -->
+            <div class="gauge-container">
+                <div class="gauge-ring" id="gauge-ring">
+                    <svg viewBox="0 0 200 200">
+                        <circle cx="100" cy="100" r="88" class="gauge-track"/>
+                        <circle cx="100" cy="100" r="88" class="gauge-fill" id="gauge-fill"/>
+                    </svg>
+                    <div class="gauge-center">
+                        <span class="gauge-temp" id="gauge-temp">--°</span>
+                        <span class="gauge-zone" id="gauge-zone">Normal</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sensor cards -->
+            <div class="sensor-grid">
+                <div class="sensor-card" id="sensor-cpu">
+                    <span class="sensor-label">CPU</span>
+                    <span class="sensor-value" id="cpu-temp">--°</span>
+                </div>
+                <div class="sensor-card" id="sensor-gpu">
+                    <span class="sensor-label">GPU</span>
+                    <span class="sensor-value" id="gpu-temp">--°</span>
+                </div>
+                <div class="sensor-card" id="sensor-batt">
+                    <span class="sensor-label">Battery</span>
+                    <span class="sensor-value" id="batt-temp">--°</span>
+                </div>
+                <div class="sensor-card" id="sensor-skin">
+                    <span class="sensor-label">Skin</span>
+                    <span class="sensor-value" id="skin-temp">--°</span>
+                </div>
+            </div>
+
+            <!-- Mini history graph -->
+            <div class="graph-container">
+                <div class="graph-header">
+                    <span class="graph-title">Last 10 Minutes</span>
+                </div>
+                <canvas id="history-graph" width="360" height="100"></canvas>
+            </div>
+
+            <!-- Profile selector -->
+            <div class="profile-selector">
+                <button class="profile-btn active" data-profile="auto" onclick="selectProfile('auto')">Automatic</button>
+                <button class="profile-btn" data-profile="gaming" onclick="selectProfile('gaming')">Gaming</button>
+                <button class="profile-btn" data-profile="saver" onclick="selectProfile('saver')">Saver</button>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════
+             PROFILES
+             ═══════════════════════════════════════════ -->
+        <div id="screen-profiles" class="screen">
+            <header class="header">
+                <h1 class="app-title">Profiles</h1>
+            </header>
+
+            <div class="profile-editor">
+                <div class="profile-tabs">
+                    <button class="profile-tab active" data-tab="gaming" onclick="switchProfileTab('gaming')">Gaming</button>
+                    <button class="profile-tab" data-tab="auto" onclick="switchProfileTab('auto')">Automatic</button>
+                    <button class="profile-tab" data-tab="saver" onclick="switchProfileTab('saver')">Saver</button>
+                </div>
+
+                <!-- Gaming profile editor -->
+                <div class="profile-panel active" id="panel-gaming">
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Push Start</span>
+                            <span class="slider-value" id="gaming-push-val">38°C</span>
+                        </label>
+                        <input type="range" class="slider" id="gaming-push" min="30" max="42" value="38"
+                               oninput="updateSlider('gaming-push', 'gaming-push-val', '°C')">
+                    </div>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Limit Start</span>
+                            <span class="slider-value" id="gaming-limit-val">43°C</span>
+                        </label>
+                        <input type="range" class="slider" id="gaming-limit" min="36" max="46" value="43"
+                               oninput="updateSlider('gaming-limit', 'gaming-limit-val', '°C')">
+                    </div>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Clock Step-Down</span>
+                            <span class="slider-value" id="gaming-step-val">5%</span>
+                        </label>
+                        <input type="range" class="slider" id="gaming-step" min="2" max="15" value="5"
+                               oninput="updateSlider('gaming-step', 'gaming-step-val', '%')">
+                    </div>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Charging Current (Limit Zone)</span>
+                            <span class="slider-value" id="gaming-chg-val">1.5 A</span>
+                        </label>
+                        <input type="range" class="slider" id="gaming-chg" min="500" max="3000" value="1500" step="100"
+                               oninput="updateSliderA('gaming-chg', 'gaming-chg-val')">
+                    </div>
+                    <div class="toggle-group">
+                        <span>Throttle Background Processes</span>
+                        <label class="toggle">
+                            <input type="checkbox" id="gaming-bg" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="toggle-group">
+                        <span>Auto-activate When Game Opens</span>
+                        <label class="toggle">
+                            <input type="checkbox" id="gaming-auto" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Automatic profile editor -->
+                <div class="profile-panel" id="panel-auto">
+                    <p class="panel-hint">Automatic profile uses balanced defaults. Thresholds follow the device thermal zones.</p>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Push Start</span>
+                            <span class="slider-value" id="auto-push-val">38°C</span>
+                        </label>
+                        <input type="range" class="slider" id="auto-push" min="30" max="42" value="38"
+                               oninput="updateSlider('auto-push', 'auto-push-val', '°C')">
+                    </div>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Limit Start</span>
+                            <span class="slider-value" id="auto-limit-val">42°C</span>
+                        </label>
+                        <input type="range" class="slider" id="auto-limit" min="36" max="46" value="42"
+                               oninput="updateSlider('auto-limit', 'auto-limit-val', '°C')">
+                    </div>
+                </div>
+
+                <!-- Saver profile editor -->
+                <div class="profile-panel" id="panel-saver">
+                    <p class="panel-hint">Saver profile cools the device aggressively. Caps clocks earlier to protect battery.</p>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Push Start</span>
+                            <span class="slider-value" id="saver-push-val">36°C</span>
+                        </label>
+                        <input type="range" class="slider" id="saver-push" min="28" max="40" value="36"
+                               oninput="updateSlider('saver-push', 'saver-push-val', '°C')">
+                    </div>
+                    <div class="slider-group">
+                        <label class="slider-label">
+                            <span>Limit Start</span>
+                            <span class="slider-value" id="saver-limit-val">40°C</span>
+                        </label>
+                        <input type="range" class="slider" id="saver-limit" min="32" max="44" value="40"
+                               oninput="updateSlider('saver-limit', 'saver-limit-val', '°C')">
+                    </div>
+                </div>
+
+                <button class="btn-primary" onclick="saveProfile()">Save Profile</button>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════
+             SECURITY
+             ═══════════════════════════════════════════ -->
+        <div id="screen-security" class="screen">
+            <header class="header">
+                <h1 class="app-title">Security</h1>
+                <span id="sec-status" class="pill pill-active">Guarded</span>
+            </header>
+
+            <div class="sec-card">
+                <div class="sec-row">
+                    <div class="sec-info">
+                        <span class="sec-label">Hard Battery Limit</span>
+                        <span class="sec-value">48°C</span>
+                    </div>
+                    <span class="lock-badge">🔒 Locked</span>
+                </div>
+                <p class="sec-note">Cannot be raised. Exceeding this forces failsafe.</p>
+            </div>
+
+            <div class="sec-card">
+                <div class="sec-row">
+                    <div class="sec-info">
+                        <span class="sec-label">Hard CPU/GPU Die Limit</span>
+                        <span class="sec-value">85°C</span>
+                    </div>
+                    <span class="lock-badge">🔒 Locked</span>
+                </div>
+                <p class="sec-note">Cannot be raised. Exceeding this forces failsafe.</p>
+            </div>
+
+            <div class="sec-card">
+                <div class="sec-row">
+                    <div class="sec-info">
+                        <span class="sec-label">Auto-restore on Critical</span>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="sec-autorestore" checked disabled>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="sec-card">
+                <div class="sec-row">
+                    <div class="sec-info">
+                        <span class="sec-label">Notify on Limit Zone</span>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="sec-notify-limit" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="sec-card">
+                <div class="sec-row">
+                    <div class="sec-info">
+                        <span class="sec-label">Read-Only Mode</span>
+                        <span class="sec-sub" id="sec-readonly-status">Inactive</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- History -->
+            <div class="history-section">
+                <h2 class="section-title">History</h2>
+                <div id="history-list" class="history-list">
+                    <div class="history-empty">No events yet.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════
+             Bottom Navigation
+             ═══════════════════════════════════════════ -->
+        <nav class="bottom-nav">
+            <button class="nav-btn active" data-screen="home" onclick="navigateTo('home')">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path d="M3 12l9-9 9 9M5 10v10h5v-6h4v6h5V10"/></svg>
+                <span>Home</span>
+            </button>
+            <button class="nav-btn" data-screen="profiles" onclick="navigateTo('profiles')">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 3v3m0 12v3m9-9h-3M6 12H3m14.5-6.5l-2 2m-7 7l-2 2m11 0l-2-2m-7-7l-2-2"/><circle cx="12" cy="12" r="4"/></svg>
+                <span>Profiles</span>
+            </button>
+            <button class="nav-btn" data-screen="security" onclick="navigateTo('security')">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5.25-3.5 9.74-8 11-4.5-1.26-8-5.75-8-11V6l8-4z"/></svg>
+                <span>Security</span>
+            </button>
+        </nav>
+
+        <!-- Toast -->
+        <div id="toast" class="toast hidden">Profile saved</div>
+
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

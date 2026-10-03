@@ -1,0 +1,18 @@
+# ThermalGuard SELinux rules
+# Do NOT set SELinux to permissive.
+
+# Allow magisk daemon to read thermal sysfs nodes
+allow untrusted_app sysfs_thermal:dir r_dir_perms;
+allow untrusted_app sysfs_thermal:file r_file_perms;
+
+# Allow module scripts to read/write CPU frequency and thermal nodes
+allow magisk sysfs:dir r_dir_perms;
+allow magisk sysfs:file { read write open getattr ioctl };
+
+# Allow WebUI bridge (ksud/apd) to access module status files
+allow system_app system_data_file:dir r_dir_perms;
+allow system_app system_data_file:file r_file_perms;
+
+# Allow charging control nodes
+allow magisk sysfs_devices_system_cpu:dir r_dir_perms;
+allow magisk sysfs_devices_system_cpu:file { read write open getattr ioctl };

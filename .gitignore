@@ -1,0 +1,12 @@
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.zip
+*.tar
+*.tar.gz
+
+# Runtime data (created on device at install)
+backup/
+state/
+logs/

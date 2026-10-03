@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "defaults": {
+    "poll_interval_sec": 2,
+    "hysteresis_c": 2,
+    "step_down_pct": 5,
+    "lockout_sec": 300,
+    "profiles": {
+      "auto": {
+        "label": "Automatic",
+        "description": "Balanced behavior. Scales with heat; no manual override.",
+        "zones": {
+          "normal": {
+            "max_temp_c": 38,
+            "action": "none"
+          },
+          "push": {
+            "max_temp_c": 42,
+            "action": "raise_trip",
+            "trip_offset_c": 3,
+            "maintain_max_freq": true
+          },
+          "limit": {
+            "max_temp_c": 45,
+            "action": "step_down",
+            "step_down_pct": 5,
+            "reduce_charging": true,
+            "charging_current_ma": 1500,
+            "throttle_background": true
+          },
+          "critical": {
+            "max_temp_c": 999,
+            "action": "failsafe"
+          }
+        }
+      },
+      "gaming": {
+        "label": "Gaming",
+        "description": "Keeps max clocks longer. Gradual step-down when limit is reached.",
+        "zones": {
+          "normal": {
+            "max_temp_c": 38,
+            "action": "none"
+          },
+          "push": {
+            "max_temp_c": 43,
+            "action": "raise_trip",
+            "trip_offset_c": 4,
+            "maintain_max_freq": true
+          },
+          "limit": {
+            "max_temp_c": 46,
+            "action": "step_down",
+            "step_down_pct": 5,
+            "reduce_charging": true,
+            "charging_current_ma": 1500,
+            "throttle_background": true
+          },
+          "critical": {
+            "max_temp_c": 999,
+            "action": "failsafe"
+          }
+        }
+      },
+      "saver": {
+        "label": "Saver",
+        "description": "Aggressive cooling. Caps clocks earlier; keeps battery cool.",
+        "zones": {
+          "normal": {
+            "max_temp_c": 36,
+            "action": "none"
+          },
+          "push": {
+            "max_temp_c": 40,
+            "action": "step_down",
+            "step_down_pct": 3,
+            "maintain_max_freq": false
+          },
+          "limit": {
+            "max_temp_c": 43,
+            "action": "step_down",
+            "step_down_pct": 8,
+            "reduce_charging": true,
+            "charging_current_ma": 1000,
+            "throttle_background": true
+          },
+          "critical": {
+            "max_temp_c": 999,
+            "action": "failsafe"
+          }
+        }
+      }
+    }
+  },
+  "absolute_limits": {
+    "cpu_gpu_die_c": 85,
+    "battery_c": 48,
+    "note": "Hard limits. Cannot be raised from the UI. Exceeding either forces Critical zone."
+  },
+  "notifications": {
+    "notify_on_limit_zone": true,
+    "notify_on_critical": true
+  }
+}

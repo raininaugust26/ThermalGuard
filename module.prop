@@ -1,0 +1,7 @@
+id=thermalguard
+name=ThermalGuard
+version=v1.0.0
+versionCode=10000
+author=RainInAugust26
+description=Graduated thermal throttling with emergency failsafe. Keeps performance high under heat by shaping throttle curves instead of disabling protection. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
+updateJson=
