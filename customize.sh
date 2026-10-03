@@ -159,6 +159,15 @@ mkdir -p "${TGDIR}/logs" 2>/dev/null
 # Keep module.prop in data dir (WebUI version display)
 cp "${MODDIR}/module.prop" "${TGDIR}/module.prop" 2>/dev/null
 
+# Runtime scripts + config live under /data/adb/thermalguard (daemon calls these)
+mkdir -p "${TGDIR}/bin" "${TGDIR}/config" 2>/dev/null
+cp -f "${MODDIR}/bin/"*.sh "${TGDIR}/bin/" 2>/dev/null
+if [ ! -f "${TGDIR}/config/profiles.json" ] && [ -f "${MODDIR}/config/profiles.json" ]; then
+    cp "${MODDIR}/config/profiles.json" "${TGDIR}/config/" 2>/dev/null
+fi
+chmod 755 "${TGDIR}/bin/"*.sh 2>/dev/null
+ui_print "- Runtime bin/config staged to ${TGDIR}"
+
 # Copy soc conf for detected chip
 if [ "${SOC_ID}" != "unknown" ] && [ -f "${TG_SOC}/${SOC_ID}.conf" ]; then
     cp "${TG_SOC}/${SOC_ID}.conf" "${TGDIR}/soc_detected.conf" 2>/dev/null
@@ -315,7 +324,7 @@ echo "0" > "${TG_STATE}/boot_count" 2>/dev/null
 cat > "${TGDIR}/status.json" << EOF
 {
   "module": "thermalguard",
-  "version": "v1.0.5",
+  "version": "v1.0.6",
   "soc": "${SOC_ID}",
   "soc_label": "${SOC_LABEL:-Unknown}",
   "manufacturer": "${MFG:-unknown}",

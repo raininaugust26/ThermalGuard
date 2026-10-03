@@ -52,10 +52,11 @@ TG_CHARGING_MA_LIMIT=1500
 TG_CHARGING_MA_SAVER=1000
 TG_READ_ONLY=false
 
-# Load profile JSON if jq is available, otherwise use defaults
+# Load profile JSON if jq is available, otherwise keep defaults but honor profile name
 load_profile() {
     local profile_name="$1"
     local profiles_json="${TG_CONFIG}/profiles.json"
+    TG_PROFILE="${profile_name}"
     [ -f "${profiles_json}" ] || return 1
 
     if command -v jq >/dev/null 2>&1; then
@@ -67,16 +68,22 @@ load_profile() {
         TG_STEP_DOWN_PCT=$(jq -r ".defaults.profiles.${profile_name}.zones.limit.step_down_pct // 5" "${profiles_json}" 2>/dev/null || echo 5)
         TG_CHARGING_MA_LIMIT=$(jq -r ".defaults.profiles.${profile_name}.zones.limit.charging_current_ma // 1500" "${profiles_json}" 2>/dev/null || echo 1500)
         TG_CHARGING_MA_SAVER=$(jq -r ".defaults.profiles.${profile_name}.zones.limit.charging_current_ma // 1000" "${profiles_json}" 2>/dev/null || echo 1000)
-        TG_PROFILE="${profile_name}"
     else
-        # Fallback: grep-based extraction (rough)
-        TG_PUSH_MAX=38
-        TG_LIMIT_MAX=42
-        TG_CRITICAL_MAX=45
-        TG_HYSTERESIS=2
-        TG_POLL_INTERVAL=2
-        TG_STEP_DOWN_PCT=5
-        TG_PROFILE="auto"
+        # No jq on device — keep stock thresholds; profile name still applied
+        case "${profile_name}" in
+            gaming)
+                TG_PUSH_MAX=38; TG_LIMIT_MAX=43; TG_CRITICAL_MAX=45
+                TG_STEP_DOWN_PCT=5
+                ;;
+            saver)
+                TG_PUSH_MAX=36; TG_LIMIT_MAX=40; TG_CRITICAL_MAX=45
+                TG_STEP_DOWN_PCT=8
+                ;;
+            *)
+                TG_PUSH_MAX=38; TG_LIMIT_MAX=42; TG_CRITICAL_MAX=45
+                TG_STEP_DOWN_PCT=5
+                ;;
+        esac
     fi
     # Absolute limits are never overridden
     ABS_CPU_GPU_C=85
@@ -98,55 +105,46 @@ log() {
 }
 
 # ─── Temperature reading ───────────────────────────────────────────
-# read_temp_mc <path> — reads millidegrees, returns degrees (integer)
-read_temp_mc() {
-    local path="$1"
-    if [ ! -f "${path}" ] || [ ! -r "${path}" ]; then
-        echo ""
+# read_temp_c <path> — stdout: °C bulat. Fail: kosong + return 1 (log 3 putaran pertama).
+read_temp_c() {
+    _p="$1"
+    [ -n "${_p}" ] || return 1
+    [ -f "${_p}" ] || { [ "${_loop:-0}" -le 3 ] && log "READ MISSING ${_p}"; return 1; }
+    _raw=$(cat "${_p}" 2>/dev/null | tr -d '\r\n ')
+    case "${_raw}" in
+        ''|*[!0-9-]*)
+            [ "${_loop:-0}" -le 3 ] && log "READ FAIL ${_p}: [${_raw}]"
+            return 1
+            ;;
+    esac
+    # milli-°C (thermal_zone) vs deci-°C (battery/temp) vs already °C
+    if [ "${_raw}" -ge 10000 ]; then
+        _raw=$(( _raw / 1000 ))
+    elif [ "${_raw}" -ge 100 ]; then
+        _raw=$(( _raw / 10 ))
+    fi
+    if [ "${_raw}" -lt 1 ] || [ "${_raw}" -gt 150 ]; then
+        [ "${_loop:-0}" -le 3 ] && log "READ RANGE ${_p}: ${_raw}"
         return 1
     fi
-    local raw
-    raw=$(cat "${path}" 2>/dev/null)
-    if [ -z "${raw}" ] || [ "${raw}" = "0" ]; then
-        echo ""
-        return 1
-    fi
-    # Values may be in millidegrees (e.g. 41200) or degrees (e.g. 41)
-    if [ "${raw}" -gt 1000 ]; then
-        echo $(( raw / 1000 ))
-    else
-        echo "${raw}"
-    fi
+    echo "${_raw}"
 }
 
-# read_battery_temp — battery temp in °C (power_supply usually 0.1°C units)
+read_temp_mc() { read_temp_c "$1"; }
+
 read_battery_temp() {
-    local path="${BATT_NODE:-/sys/class/power_supply/battery/temp}"
-    if [ ! -f "${path}" ] || [ ! -r "${path}" ]; then
-        # last-resort thermal zone
-        local meta
-        meta=$(find_thermal_zone_meta "${SOC_BATT_TYPE_REGEX}")
-        path="${meta%%|*}"
-        [ "${path}" = "${meta}" ] && path=""
-        [ -n "${path}" ] && [ -f "${path}" ] || { echo ""; return 1; }
+    # Prefer power_supply node; fall back to thermal zone battery/bms
+    if [ -n "${BATT_NODE}" ] && [ -f "${BATT_NODE}" ]; then
+        read_temp_c "${BATT_NODE}" && return 0
     fi
-    local raw
-    raw=$(cat "${path}" 2>/dev/null)
-    if [ -z "${raw}" ]; then
-        echo ""
-        return 1
-    fi
-    case "${raw}" in
-        *[!0-9-]*) echo ""; return 1 ;;
-    esac
-    # 0.1°C units (360=36.0) vs already °C vs millidegrees (36000)
-    if [ "${raw}" -gt 10000 ]; then
-        echo $(( raw / 1000 ))
-    elif [ "${raw}" -gt 100 ]; then
-        echo $(( raw / 10 ))
-    else
-        echo "${raw}"
-    fi
+    for _bp in /sys/class/power_supply/battery/temp /sys/class/power_supply/bms/temp; do
+        [ -f "${_bp}" ] || continue
+        read_temp_c "${_bp}" && return 0
+    done
+    _meta=$(find_thermal_zone_meta "${SOC_BATT_TYPE_REGEX}" 2>/dev/null || echo "")
+    _bpath="${_meta%%|*}"
+    [ -n "${_bpath}" ] && [ -f "${_bpath}" ] && read_temp_c "${_bpath}" && return 0
+    return 1
 }
 
 # dump_thermal_zones → sensors.txt (for diagnostics / share logs)
@@ -743,8 +741,31 @@ clear_boot_marker() {
 }
 
 # ─── Main daemon loop ──────────────────────────────────────────────
+# zone_rank <zone> — higher = hotter. Used so hysteresis only blocks DOWNGRADE.
+zone_rank() {
+    case "$1" in
+        critical) echo 3 ;;
+        limit)    echo 2 ;;
+        push)     echo 1 ;;
+        *)        echo 0 ;;
+    esac
+}
+
 main() {
     log "ThermalGuard daemon starting (SOC=${SOC_ID}, mfg=${MFG:-unknown}, samsung_safe=${TG_SAMSUNG_SAFE}, read_only=${TG_READ_ONLY})"
+
+    # Ensure runtime bin/config exist (upgrade path if customize did not stage them)
+    mkdir -p "${TGDIR}/bin" "${TGDIR}/config" 2>/dev/null
+    if [ ! -f "${TG_BIN}/failsafe.sh" ]; then
+        cp -f "/data/adb/modules/thermalguard/bin/"*.sh "${TGDIR}/bin/" 2>/dev/null
+        chmod 755 "${TGDIR}/bin/"*.sh 2>/dev/null
+    fi
+    if [ ! -f "${TG_CONFIG}/profiles.json" ]; then
+        cp -f "/data/adb/modules/thermalguard/config/profiles.json" "${TGDIR}/config/" 2>/dev/null
+    fi
+    if [ ! -f "${TGDIR}/module.prop" ]; then
+        cp -f "/data/adb/modules/thermalguard/module.prop" "${TGDIR}/module.prop" 2>/dev/null
+    fi
     # NOTE: boot marker is NOT cleared here — cleared only after health check below.
 
     # Load initial profile
@@ -857,14 +878,21 @@ main() {
             else
                 new_zone="normal"
             fi
-            # Hysteresis: stay in hotter zone until temp drops below threshold - hyst
+
+            # Hysteresis ONLY when zone would go DOWN (never block critical/abs limit)
             prev_zone=$(cat "${CURRENT_ZONE_FILE}" 2>/dev/null || echo "normal")
-            if [ "${prev_zone}" = "critical" ] && [ "${dev_temp}" -ge $(( TG_CRITICAL_MAX - TG_HYSTERESIS )) ] 2>/dev/null; then
-                new_zone="critical"
-            elif [ "${prev_zone}" = "limit" ] && [ "${dev_temp}" -ge $(( TG_LIMIT_MAX - TG_HYSTERESIS )) ] 2>/dev/null; then
-                new_zone="limit"
-            elif [ "${prev_zone}" = "push" ] && [ "${dev_temp}" -ge $(( TG_PUSH_MAX - TG_HYSTERESIS )) ] 2>/dev/null; then
-                new_zone="push"
+            if [ "$(zone_rank "${new_zone}")" -lt "$(zone_rank "${prev_zone}")" ]; then
+                case "${prev_zone}" in
+                    critical)
+                        [ "${dev_temp}" -ge $(( TG_CRITICAL_MAX - TG_HYSTERESIS )) ] 2>/dev/null && new_zone="critical"
+                        ;;
+                    limit)
+                        [ "${dev_temp}" -ge $(( TG_LIMIT_MAX - TG_HYSTERESIS )) ] 2>/dev/null && new_zone="limit"
+                        ;;
+                    push)
+                        [ "${dev_temp}" -ge $(( TG_PUSH_MAX - TG_HYSTERESIS )) ] 2>/dev/null && new_zone="push"
+                        ;;
+                esac
             fi
         fi
         [ -n "${new_zone}" ] || new_zone="normal"

@@ -54,32 +54,43 @@ zone_engine_resolve() {
         return 0
     fi
 
-    # Hysteresis: stay in hotter zone until temp drops below threshold - hysteresis
-    # POSIX if/elif — do NOT use bash-only ;;&
+    # Hysteresis ONLY when zone would go DOWN (never override critical / abs limit)
     crit_thresh=$(( TG_CRITICAL_MAX - TG_HYSTERESIS ))
     limit_thresh=$(( TG_LIMIT_MAX - TG_HYSTERESIS ))
     push_thresh=$(( TG_PUSH_MAX - TG_HYSTERESIS ))
 
-    if [ "${prev_zone}" = "${ZONE_CRITICAL}" ] && [ "${dev_temp}" -ge "${crit_thresh}" ]; then
-        echo "${ZONE_CRITICAL}"
-        return 0
-    fi
-    if [ "${prev_zone}" = "${ZONE_LIMIT}" ] && [ "${dev_temp}" -ge "${limit_thresh}" ]; then
-        echo "${ZONE_LIMIT}"
-        return 0
-    fi
-    if [ "${prev_zone}" = "${ZONE_PUSH}" ] && [ "${dev_temp}" -ge "${push_thresh}" ]; then
-        echo "${ZONE_PUSH}"
-        return 0
+    zone_rank() {
+        case "$1" in
+            critical) echo 3 ;;
+            limit)    echo 2 ;;
+            push)     echo 1 ;;
+            *)        echo 0 ;;
+        esac
+    }
+
+    # Threshold first (abs critical already returned above)
+    if [ "${dev_temp}" -ge "${TG_LIMIT_MAX}" ]; then
+        _z="limit"
+    elif [ "${dev_temp}" -ge "${TG_PUSH_MAX}" ]; then
+        _z="push"
+    else
+        _z="normal"
     fi
 
-    if [ "${dev_temp}" -ge "${TG_LIMIT_MAX}" ]; then
-        echo "${ZONE_LIMIT}"
-    elif [ "${dev_temp}" -ge "${TG_PUSH_MAX}" ]; then
-        echo "${ZONE_PUSH}"
-    else
-        echo "${ZONE_NORMAL}"
+    if [ "$(zone_rank "${_z}")" -lt "$(zone_rank "${prev_zone}")" ]; then
+        case "${prev_zone}" in
+            critical)
+                [ "${dev_temp}" -ge "${crit_thresh}" ] && _z="critical"
+                ;;
+            limit)
+                [ "${dev_temp}" -ge "${limit_thresh}" ] && _z="limit"
+                ;;
+            push)
+                [ "${dev_temp}" -ge "${push_thresh}" ] && _z="push"
+                ;;
+        esac
     fi
+    echo "${_z}"
 }
 
 # zone_engine_log <old_zone> <new_zone> <temp_c> <reason>
