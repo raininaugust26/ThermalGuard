@@ -1,0 +1,71 @@
+name: Feature request
+description: Suggest an improvement for ThermalGuard
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome if they keep the module **safe by default**.
+
+        Requests that fully disable thermal protection, spoof sensors, or overclock beyond stock limits will be closed.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Zone engine / thresholds
+        - SoC support
+        - Charging control
+        - Profiles / per-app
+        - WebUI
+        - Logging / history
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What limitation or pain point are you trying to solve?
+      placeholder: "FPS drops hard at 42°C even though the phone can sustain higher clocks..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should ThermalGuard do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about (optional)
+
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Could this affect thermal safety?
+      options:
+        - No — monitoring, UI, or docs only
+        - Yes — must keep hard limits and fail-safe
+        - Unsure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I understand absolute limits (CPU/GPU 85°C, battery 48°C) cannot be removed
+          required: true
+        - label: I searched existing issues and feature requests
+          required: true

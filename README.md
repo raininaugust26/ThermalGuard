@@ -169,6 +169,21 @@ If your device is detected as unknown (read-only mode):
 3. Test that the paths are correct for your device.
 4. Submit a pull request with the new SoC profile.
 
+Full instructions: [docs/SOC_GUIDE.md](docs/SOC_GUIDE.md)
+
+## Community & Security
+
+| Document | Purpose |
+|----------|---------|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to report bugs, propose features, and open PRs |
+| [SECURITY.md](SECURITY.md) | Private vulnerability reporting and project scope |
+| [docs/FAILSAFE_EXPLAINED.md](docs/FAILSAFE_EXPLAINED.md) | Hard limits, lockout, bootloop protection |
+| [docs/SOC_GUIDE.md](docs/SOC_GUIDE.md) | Chipset detection and path map format |
+
+**Security issues:** do not open public issues. Use [GitHub Security Advisories](https://github.com/raininaugust26/ThermalGuard/security/advisories/new) or email `raininaugust26@gmail.com`.
+
 ## License
+
+GNU General Public License v3.0. See [LICENSE](LICENSE).
 
 This project is provided as-is for educational and personal use. The authors are not responsible for any damage to your device.

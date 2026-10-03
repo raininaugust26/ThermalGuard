@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/raininaugust26/ThermalGuard/security/advisories/new
+    about: Report security issues privately. Do not open a public issue.
+  - name: SoC contribution guide
+    url: https://github.com/raininaugust26/ThermalGuard/blob/main/docs/SOC_GUIDE.md
+    about: How to add or fix a chipset path map before opening a PR.
+  - name: Fail-safe documentation
+    url: https://github.com/raininaugust26/ThermalGuard/blob/main/docs/FAILSAFE_EXPLAINED.md
+    about: Understand hard limits, lockout, and bootloop protection.

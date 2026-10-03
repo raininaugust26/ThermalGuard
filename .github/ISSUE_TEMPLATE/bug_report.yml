@@ -1,0 +1,135 @@
+name: Bug report
+description: Report a problem with ThermalGuard (wrong zone, fail-safe, install, WebUI)
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        **Do not post security vulnerabilities here.**  
+        Use [Security Advisories](https://github.com/raininaugust26/ThermalGuard/security/advisories/new) or email `raininaugust26@gmail.com` instead.
+
+        Redact serial numbers, IMEI, and other personal data from logs.
+
+  - type: dropdown
+    id: root
+    attributes:
+      label: Root solution
+      options:
+        - Magisk
+        - KernelSU
+        - APatch
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: root_version
+    attributes:
+      label: Root solution version
+      placeholder: "e.g. Magisk 27.0"
+    validations:
+      required: true
+
+  - type: input
+    id: module_version
+    attributes:
+      label: ThermalGuard version
+      placeholder: "e.g. 1.0.0 (from module.prop)"
+    validations:
+      required: true
+
+  - type: input
+    id: android_version
+    attributes:
+      label: Android version
+      placeholder: "e.g. Android 14"
+    validations:
+      required: true
+
+  - type: input
+    id: device_soc
+    attributes:
+      label: Device and SoC
+      placeholder: "e.g. Pixel 7 / Tensor G2, or SM-A536B / Exynos 1280"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: soc_detected
+    attributes:
+      label: Detected SoC mode
+      options:
+        - Full mode (SoC detected)
+        - Read-only mode (unknown SoC)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Installation / customize.sh
+        - Daemon / service.sh
+        - Zone engine (wrong zone)
+        - Fail-safe / lockout
+        - Charging control
+        - Frequency step-down
+        - WebUI
+        - Bootloop protection
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the problem
+      description: What happened? What did you expect?
+      placeholder: "Zone stays at Limit even after temperature drops below threshold..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Install module
+        2. Select Gaming profile
+        3. Run a game for 20 minutes
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Paste excerpts from `/data/adb/thermalguard/logs/daemon.log` and/or `status.json`.
+        Remove personal data first.
+      render: text
+
+  - type: textarea
+    id: temp_info
+    attributes:
+      label: Temperature / zone info (if applicable)
+      description: "Example: device 46°C, battery 41°C, zone stuck in Limit, failsafe not triggered"
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find this report
+          required: true
+        - label: I did not remove or weaken absolute thermal limits
+          required: true
+        - label: I understand this module requires root and can affect device temperature
+          required: true
