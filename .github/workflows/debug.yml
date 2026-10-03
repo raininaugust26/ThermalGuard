@@ -1,0 +1,189 @@
+name: Debug Module / Beta Test
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'module.prop'
+      - 'customize.sh'
+      - 'service.sh'
+      - 'post-fs-data.sh'
+      - 'sepolicy.rule'
+      - 'bin/**'
+      - 'config/**'
+      - 'soc/**'
+      - 'webroot/**'
+      - '.github/workflows/debug.yml'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel label'
+        required: false
+        default: 'beta'
+      notes:
+        description: 'Optional notes for testers'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  beta:
+    name: Build beta / debug zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve beta version
+        id: ver
+        run: |
+          set -euo pipefail
+          PROP_VERSION=$(sed -n 's/^version=//p' module.prop | tr -d '\r' | head -1)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          CHANNEL="${{ github.event.inputs.channel || 'beta' }}"
+          RUN_ID="${GITHUB_RUN_ID}"
+
+          # Unique, readable label — never overwrites a stable vX.Y.Z release name
+          VERSION="${PROP_VERSION}-${CHANNEL}.${RUN_ID}+${SHORT_SHA}"
+          # zip names cannot contain '+' safely on all tools — replace
+          ZIP_VERSION="${PROP_VERSION}-${CHANNEL}.${RUN_ID}-${SHORT_SHA}"
+          ZIP_NAME="ThermalGuard-${ZIP_VERSION}.zip"
+
+          echo "version_label=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "prop_version=${PROP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Beta version: ${ZIP_NAME}"
+
+      - name: Stage module files (zip root = module root)
+        run: |
+          set -euo pipefail
+          STAGE="${RUNNER_TEMP}/thermalguard-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          cp module.prop customize.sh post-fs-data.sh service.sh sepolicy.rule \
+             LICENSE README.md "$STAGE/"
+          cp -a bin config soc webroot "$STAGE/"
+
+          mkdir -p "$STAGE/META-INF/com/google/android"
+          curl -fsSL -o "$STAGE/META-INF/com/google/android/update-binary" \
+            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh
+          printf '%s\n' '#MAGISK' > "$STAGE/META-INF/com/google/android/updater-script"
+
+          find "$STAGE" -name '*.zip' -delete
+
+          echo "Staged tree:"
+          find "$STAGE" -type f | sort
+
+      - name: Create single beta zip
+        id: zip
+        run: |
+          set -euo pipefail
+          ZIP_NAME="${{ steps.ver.outputs.zip_name }}"
+          STAGE="${RUNNER_TEMP}/thermalguard-stage"
+          OUT="${GITHUB_WORKSPACE}/${ZIP_NAME}"
+
+          rm -f "$OUT"
+          (cd "$STAGE" && zip -r -9 "$OUT" .)
+
+          echo "===== ZIP listing ====="
+          unzip -l "$OUT"
+
+      - name: Verify zip structure
+        run: |
+          set -euo pipefail
+          ZIP_NAME="${{ steps.ver.outputs.zip_name }}"
+          LIST=$(unzip -l "$ZIP_NAME" | awk '{print $NF}')
+
+          if ! echo "$LIST" | grep -qx 'module.prop'; then
+            echo "::error::module.prop is not at the zip root"
+            exit 1
+          fi
+
+          if echo "$LIST" | grep -Eiq '\.zip$'; then
+            echo "::error::Found a .zip inside the beta zip (nested archive)"
+            exit 1
+          fi
+
+          for f in customize.sh service.sh post-fs-data.sh; do
+            if ! echo "$LIST" | grep -qx "$f"; then
+              echo "::error::Missing required file at zip root: $f"
+              exit 1
+            fi
+          done
+
+          echo "Beta zip structure OK."
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.zip_name }}
+          path: ${{ steps.ver.outputs.zip_name }}
+          if-no-files-found: error
+
+      - name: Publish rolling beta prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIP_NAME: ${{ steps.ver.outputs.zip_name }}
+          VERSION_LABEL: ${{ steps.ver.outputs.version_label }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+          SHORT_SHA: ${{ steps.ver.outputs.short_sha }}
+          PROP_VERSION: ${{ steps.ver.outputs.prop_version }}
+          NOTES: ${{ github.event.inputs.notes }}
+        run: |
+          set -euo pipefail
+
+          # Rolling channel tag (moved each beta build) — not a stable vX.Y.Z
+          TAG="channel-${CHANNEL}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$TAG" -m "ThermalGuard ${CHANNEL} ${SHORT_SHA}"
+          git push origin "refs/tags/${TAG}" --force
+
+          NOTES_BODY="## ThermalGuard ${CHANNEL} build
+
+          | Field | Value |
+          |-------|-------|
+          | Channel | \`${CHANNEL}\` |
+          | Version label | \`${VERSION_LABEL}\` |
+          | Base version | \`${PROP_VERSION}\` |
+          | Commit | \`${SHORT_SHA}\` |
+          | Run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
+
+          ### Install
+          1. Download \`${ZIP_NAME}\` from Assets below (single zip, no nested archives)
+          2. Flash via Magisk / KernelSU / APatch
+          3. Reboot
+          4. Test and report issues with the run link
+
+          ### Notes
+          ${NOTES:-_No extra notes._}
+
+          ### Safety
+          Hard limits unchanged: CPU/GPU die 85°C, battery 48°C.
+          This is a **prerelease** for testing — not for production daily use unless you accept beta risk.
+          "
+
+          # Normalize indentation in notes
+          NOTES_BODY=$(printf '%s\n' "$NOTES_BODY" | sed 's/^          //')
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP_NAME" --clobber
+            gh release edit "$TAG" \
+              --prerelease \
+              --title "ThermalGuard ${CHANNEL} (${SHORT_SHA})" \
+              --notes "$NOTES_BODY"
+          else
+            gh release create "$TAG" "$ZIP_NAME" \
+              --prerelease \
+              --title "ThermalGuard ${CHANNEL} (${SHORT_SHA})" \
+              --notes "$NOTES_BODY"
+          fi
+
+          echo "Published prerelease tag: ${TAG}"
+          echo "Asset: ${ZIP_NAME}"

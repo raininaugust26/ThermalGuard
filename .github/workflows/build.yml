@@ -1,0 +1,156 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Optional version label (e.g. v1.0.1-rc1). Default: from module.prop'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build module zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          PROP_VERSION=$(sed -n 's/^version=//p' module.prop | tr -d '\r' | head -1)
+          OVERRIDE="${{ github.event.inputs.version_override }}"
+          if [ -n "$OVERRIDE" ]; then
+            VERSION="$OVERRIDE"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${PROP_VERSION}"
+          fi
+          # Normalize: ensure leading v
+          case "$VERSION" in
+            v*) ;;
+            *) VERSION="v${VERSION}" ;;
+          esac
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      - name: Stage module files (zip root = module root)
+        run: |
+          set -euo pipefail
+          STAGE="${RUNNER_TEMP}/thermalguard-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          # Runtime / install files only — no docs, no .github, no nested zips
+          cp module.prop customize.sh post-fs-data.sh service.sh sepolicy.rule \
+             LICENSE README.md "$STAGE/"
+          cp -a bin config soc webroot "$STAGE/"
+
+          # Magisk-compatible META-INF (KernelSU/APatch also accept this layout)
+          mkdir -p "$STAGE/META-INF/com/google/android"
+          curl -fsSL -o "$STAGE/META-INF/com/google/android/update-binary" \
+            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh
+          printf '%s\n' '#MAGISK' > "$STAGE/META-INF/com/google/android/updater-script"
+
+          # Safety: never ship a zip inside the module zip
+          find "$STAGE" -name '*.zip' -delete
+
+          echo "Staged tree:"
+          find "$STAGE" -type f | sort
+
+      - name: Create single release zip
+        id: zip
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          ZIP_NAME="ThermalGuard-${VERSION}.zip"
+          STAGE="${RUNNER_TEMP}/thermalguard-stage"
+          OUT="${GITHUB_WORKSPACE}/${ZIP_NAME}"
+
+          rm -f "$OUT"
+          # Zip contents of stage — module.prop at ZIP ROOT (not thermalguard/module.prop)
+          (cd "$STAGE" && zip -r -9 "$OUT" .)
+
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "===== ZIP listing ====="
+          unzip -l "$OUT"
+
+      - name: Verify zip structure
+        run: |
+          set -euo pipefail
+          ZIP_NAME="${{ steps.zip.outputs.zip_name }}"
+          LIST=$(unzip -l "$ZIP_NAME" | awk '{print $NF}')
+
+          # 1) module.prop must exist at zip root
+          if ! echo "$LIST" | grep -qx 'module.prop'; then
+            echo "::error::module.prop is not at the zip root"
+            exit 1
+          fi
+
+          # 2) No nested .zip inside the package
+          if echo "$LIST" | grep -Eiq '\.zip$'; then
+            echo "::error::Found a .zip inside the release zip (nested archive)"
+            echo "$LIST" | grep -Ei '\.zip$' || true
+            exit 1
+          fi
+
+          # 3) Required Magisk/KernelSU entry points present
+          for f in customize.sh service.sh post-fs-data.sh; do
+            if ! echo "$LIST" | grep -qx "$f"; then
+              echo "::error::Missing required file at zip root: $f"
+              exit 1
+            fi
+          done
+
+          # 4) No repo-only junk
+          for bad in .git .github docs CONTRIBUTING.md SECURITY.md; do
+            if echo "$LIST" | grep -q "^${bad}/\|^${bad}$"; then
+              echo "::error::Repo-only path leaked into module zip: $bad"
+              exit 1
+            fi
+          done
+
+          echo "Zip structure OK: single archive, module.prop at root, no nested zips."
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.zip_name }}
+          path: ${{ steps.zip.outputs.zip_name }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ThermalGuard ${{ github.ref_name }}
+          files: ${{ steps.zip.outputs.zip_name }}
+          generate_release_notes: true
+          body: |
+            ## ThermalGuard ${{ github.ref_name }}
+
+            ### Install
+            1. Download `ThermalGuard-${{ github.ref_name }}.zip`
+            2. Flash via Magisk / KernelSU / APatch
+            3. Reboot
+
+            ### Package layout
+            - `module.prop` at zip root
+            - Single zip (no nested archives)
+            - Includes `META-INF` for Magisk compatibility
+
+            ### Safety
+            - Hard limits: CPU/GPU die **85°C**, battery **48°C**
+            - Fail-safe restores stock values; module locks 5 minutes after Critical
+            - See `docs/FAILSAFE_EXPLAINED.md` in the repository
