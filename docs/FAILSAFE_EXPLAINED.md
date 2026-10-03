@@ -71,14 +71,17 @@ Lockout cannot be skipped from the WebUI. It is intentional.
 Implemented in `post-fs-data.sh`:
 
 1. On each early boot, a marker file `state/boot_marker` is written.
-2. If the previous boot left a marker (unclean/failed boot), `boot_count` increases.
-3. After **two** consecutive failures:
+2. `service.sh` clears the marker **only after** a health check (daemon wrote `status.json` successfully).
+3. If the previous boot left a marker (unclean/failed boot), `boot_count` increases.
+4. After **two** consecutive incomplete boots:
    - Module creates `/data/adb/thermalguard/disable`
-   - Also creates Magisk/KSU disable flag under the module folder if present
+   - Also creates `/data/adb/modules/thermalguard/disable`
    - Marker is cleared; count resets
-4. On a successful boot path, `service.sh` clears the marker.
+5. **Important (v1.0.1+):** `post-fs-data.sh` never writes thermal/cpufreq/charging sysfs nodes. Fail-safe restore runs only from the late-start daemon, not during early boot.
 
-So a bad tweak that prevents boot should disable the module after two attempts instead of looping forever.
+This avoids writing unknown or firmware-guarded paths too early (known bootloop cause on some Samsung devices).
+
+See also: [BOOTLOOP_RECOVERY.md](BOOTLOOP_RECOVERY.md).
 
 ## Sensor Validation
 

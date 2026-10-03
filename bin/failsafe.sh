@@ -202,11 +202,13 @@ failsafe_run() {
     fi
 }
 
-# When executed directly
-if [ "${0}" = "${BASH_SOURCE[0]}" ] || [ -z "${BASH_SOURCE[0]}" ]; then
-    if [ $# -ge 1 ]; then
-        failsafe_run "$1"
-    else
-        failsafe_run "manual"
-    fi
-fi
+# When executed directly (not sourced)
+case "${0}" in
+    *failsafe.sh)
+        if [ $# -ge 1 ]; then
+            failsafe_run "$1"
+        else
+            failsafe_run "manual"
+        fi
+        ;;
+esac

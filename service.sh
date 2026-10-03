@@ -17,9 +17,23 @@ LOCKOUT_FILE="${TG_STATE}/lockout_until"
 CURRENT_ZONE_FILE="${TG_STATE}/current_zone"
 PREV_ZONE_FILE="${TG_STATE}/prev_zone"
 SOC_ID_FILE="${TG_STATE}/soc_id"
+BOOT_MARKER="${TG_STATE}/boot_marker"
+TG_SAMSUNG_SAFE="false"
+TG_FIRST_HEALTHY="0"
 
-# Wait for boot to complete
-sleep 15
+# ─── Device safety profile ─────────────────────────────────────────
+# Samsung OneUI thermal-engine is aggressive. Writing trip points or
+# charging nodes too early can reboot/bootloop the device.
+MFG=$(getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]')
+case "${MFG}" in
+    *samsung*)
+        TG_SAMSUNG_SAFE="true"
+        sleep 45
+        ;;
+    *)
+        sleep 25
+        ;;
+esac
 
 # ─── Load configuration ────────────────────────────────────────────
 # Default thresholds
@@ -182,6 +196,12 @@ action_raise_trip() {
     local offset_c="${1:-3}"
     local offset_mc=$(( offset_c * 1000 ))
 
+    # Samsung: trip-point writes can panic thermal-engine → bootloop
+    if [ "${TG_SAMSUNG_SAFE}" = "true" ]; then
+        log "Samsung-safe: skip raise_trip"
+        return 0
+    fi
+
     if [ "${TG_READ_ONLY}" = "true" ]; then
         log "Read-only mode: skip raise_trip"
         return 0
@@ -244,12 +264,21 @@ action_step_down() {
 
         local reduction=$(( current_max * pct / 100 ))
         local new_max=$(( current_max - reduction ))
+        # Samsung-safe: never go below 70% of original
+        if [ "${TG_SAMSUNG_SAFE}" = "true" ]; then
+            local safe_floor=$(( orig_max * 70 / 100 ))
+            if [ "${safe_floor}" -gt "${floor}" ]; then
+                floor="${safe_floor}"
+            fi
+        fi
         if [ "${new_max}" -lt "${floor}" ]; then
             new_max="${floor}"
         fi
-        # Round down to nearest MHz for cleanliness
+        # Round down to nearest MHz; reject empty/zero
         new_max=$(( (new_max / 1000) * 1000 ))
-        node_write "${max_node}" "${new_max}"
+        if [ -n "${new_max}" ] && [ "${new_max}" -gt 0 ]; then
+            node_write "${max_node}" "${new_max}"
+        fi
     done
 
     # GPU frequency step-down (Adreno)
@@ -309,6 +338,12 @@ action_step_down() {
 action_reduce_charging() {
     local ma="${1:-1500}"
 
+    # Samsung: charging node paths/units differ; writes can misbehave
+    if [ "${TG_SAMSUNG_SAFE}" = "true" ]; then
+        log "Samsung-safe: skip reduce_charging"
+        return 0
+    fi
+
     if [ "${TG_READ_ONLY}" = "true" ]; then
         log "Read-only mode: skip reduce_charging"
         return 0
@@ -364,6 +399,25 @@ action_failsafe() {
 # ─── Apply zone actions ────────────────────────────────────────────
 apply_zone_actions() {
     local zone="$1"
+
+    # Samsung safe mode: monitor + failsafe only.
+    # No trip-point writes, no charging writes, no cpuset tweaks.
+    if [ "${TG_SAMSUNG_SAFE}" = "true" ]; then
+        case "${zone}" in
+            normal|push)
+                log "Samsung-safe: zone=${zone} (monitor only)"
+                ;;
+            limit)
+                # Conservative step-down only; smaller percent; higher floor
+                action_step_down 3
+                log "Samsung-safe: zone=limit step_down 3%"
+                ;;
+            critical)
+                action_failsafe "zone_critical"
+                ;;
+        esac
+        return 0
+    fi
 
     case "${zone}" in
         normal)
@@ -474,8 +528,8 @@ clear_boot_marker() {
 
 # ─── Main daemon loop ──────────────────────────────────────────────
 main() {
-    log "ThermalGuard daemon starting (SOC=${SOC_ID}, read_only=${TG_READ_ONLY})"
-    clear_boot_marker
+    log "ThermalGuard daemon starting (SOC=${SOC_ID}, mfg=${MFG:-unknown}, samsung_safe=${TG_SAMSUNG_SAFE}, read_only=${TG_READ_ONLY})"
+    # NOTE: boot marker is NOT cleared here — cleared only after health check below.
 
     # Load initial profile
     load_profile "${TG_PROFILE}"
@@ -549,9 +603,25 @@ main() {
             new_zone="critical"
             log "No valid temperature sensor — forcing critical zone"
         else
-            # Source zone engine
-            . "${TG_BIN}/zone_engine.sh" 2>/dev/null
-            new_zone=$(zone_engine_resolve "${dev_temp}" "${cpu_temp:-0}" "${batt_temp:-0}")
+            # POSIX zone engine (mksh-safe). Source once; fall back if it fails.
+            if ! command -v zone_engine_resolve >/dev/null 2>&1; then
+                . "${TG_BIN}/zone_engine.sh" 2>/dev/null
+            fi
+            if command -v zone_engine_resolve >/dev/null 2>&1; then
+                new_zone=$(zone_engine_resolve "${dev_temp}" "${cpu_temp:-0}" "${batt_temp:-0}")
+            else
+                # Inline fallback thresholds (no hysteresis)
+                if [ "${dev_temp}" -ge "${TG_CRITICAL_MAX}" ]; then
+                    new_zone="critical"
+                elif [ "${dev_temp}" -ge "${TG_LIMIT_MAX}" ]; then
+                    new_zone="limit"
+                elif [ "${dev_temp}" -ge "${TG_PUSH_MAX}" ]; then
+                    new_zone="push"
+                else
+                    new_zone="normal"
+                fi
+            fi
+            [ -n "${new_zone}" ] || new_zone="normal"
         fi
 
         # Track zone transition
@@ -559,7 +629,11 @@ main() {
         prev_zone=$(cat "${CURRENT_ZONE_FILE}" 2>/dev/null || echo "normal")
 
         if [ "${new_zone}" != "${prev_zone}" ]; then
-            zone_engine_log "${prev_zone}" "${new_zone}" "${dev_temp:-0}" "temp_threshold"
+            if command -v zone_engine_log >/dev/null 2>&1; then
+                zone_engine_log "${prev_zone}" "${new_zone}" "${dev_temp:-0}" "temp_threshold"
+            else
+                echo "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) ${prev_zone} -> ${new_zone} temp=${dev_temp:-0}C" >> "${HISTORY_FILE}"
+            fi
             log "Zone transition: ${prev_zone} -> ${new_zone} (temp=${dev_temp:-N/A}C)"
             echo "${new_zone}" > "${CURRENT_ZONE_FILE}" 2>/dev/null
             echo "${prev_zone}" > "${PREV_ZONE_FILE}" 2>/dev/null
@@ -570,6 +644,14 @@ main() {
 
         # ── Update status ──
         update_status "${new_zone}" "${dev_temp:-0}" "${cpu_temp:-0}" "${gpu_temp:-0}" "${batt_temp:-0}" "${skin_temp:-0}"
+
+        # Health check: daemon produced status → clear boot marker (anti-bootloop)
+        if [ "${TG_FIRST_HEALTHY}" != "1" ] && [ -f "${STATUS_FILE}" ]; then
+            clear_boot_marker
+            echo "0" > "${TG_STATE}/boot_count" 2>/dev/null
+            TG_FIRST_HEALTHY="1"
+            log "Boot health check passed — boot marker cleared"
+        fi
 
         # ── Sleep ──
         sleep "${TG_POLL_INTERVAL}"

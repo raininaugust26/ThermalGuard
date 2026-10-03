@@ -69,9 +69,9 @@ detect_soc() {
     local socinfo
     socinfo="${hardware} ${board} ${platform}"
 
-    # Qualcomm
+    # Qualcomm (incl. Snapdragon 680 SM6225 / Holi — Galaxy A05s, etc.)
     case "${socinfo}" in
-        *qcom*|*sm[0-9]*|*msm*|*sdm*|*kona*|*lahaina*|*taro*|*kalama*|*pineapple*)
+        *qcom*|*sm[0-9]*|*msm*|*sdm*|*kona*|*lahaina*|*taro*|*kalama*|*pineapple*|*holi*|*sm6150*|*sm6225*|*bengal*|*atoll*|*trinket*|*lito*|*atoll*)
             echo "qcom"
             return 0
             ;;
@@ -120,6 +120,19 @@ detect_soc() {
 
 SOC_ID=$(detect_soc)
 ui_print "- SoC detected: ${SOC_ID}"
+
+# Manufacturer (Samsung needs conservative runtime behavior)
+MFG=$(getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]')
+case "${MFG}" in
+    *samsung*)
+        ui_print "- Manufacturer: Samsung"
+        ui_print "  Samsung-safe mode: trip/charging writes disabled at runtime."
+        ui_print "  Bootloop protection hardened in v1.0.1."
+        ;;
+    *)
+        ui_print "- Manufacturer: ${MFG:-unknown}"
+        ;;
+esac
 
 if [ "${SOC_ID}" = "unknown" ]; then
     ui_print " "

@@ -179,6 +179,7 @@ Full instructions: [docs/SOC_GUIDE.md](docs/SOC_GUIDE.md)
 | [SECURITY.md](SECURITY.md) | Private vulnerability reporting and project scope |
 | [docs/FAILSAFE_EXPLAINED.md](docs/FAILSAFE_EXPLAINED.md) | Hard limits, lockout, bootloop protection |
 | [docs/SOC_GUIDE.md](docs/SOC_GUIDE.md) | Chipset detection and path map format |
+| [docs/BOOTLOOP_RECOVERY.md](docs/BOOTLOOP_RECOVERY.md) | Stuck on logo? Disable module safely (incl. Samsung A05s) |
 
 **Security issues:** do not open public issues. Use [GitHub Security Advisories](https://github.com/raininaugust26/ThermalGuard/security/advisories/new) or email `raininaugust26@gmail.com`.
 

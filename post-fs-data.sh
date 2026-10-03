@@ -1,59 +1,59 @@
 #!/system/bin/sh
 # ThermalGuard — post-fs-data.sh
-# Runs early in boot, before most services start.
-# Minimal: boot marker + early fail-safe check only. No tweaks yet.
+# Early boot hook. SAFETY FIRST:
+#   - Never write thermal/cpufreq/charging sysfs here (Samsung bootloops).
+#   - Never run failsafe restore here.
+#   - Only: bootloop marker + auto-disable if previous boot failed.
 
 TGDIR="/data/adb/thermalguard"
 TG_STATE="${TGDIR}/state"
-TG_BIN="${TGDIR}/bin"
+MODDIR="/data/adb/modules/thermalguard"
 BOOT_MARKER="${TG_STATE}/boot_marker"
 BOOT_COUNT_FILE="${TG_STATE}/boot_count"
-FAILSAFE_DISABLE="${TGDIR}/disable"
+
+disable_module() {
+    # Multiple disable paths (Magisk / KSU / APatch / module data dir)
+    touch "${TGDIR}/disable" 2>/dev/null
+    touch "${MODDIR}/disable" 2>/dev/null
+    touch "/data/adb/modules_update/thermalguard/disable" 2>/dev/null
+    # Optional uninstall on next reboot
+    # touch "${MODDIR}/remove" 2>/dev/null
+}
+
+# ─── Already disabled? Do nothing. ─────────────────────────────────
+if [ -f "${TGDIR}/disable" ] || [ -f "${MODDIR}/disable" ]; then
+    exit 0
+fi
 
 # ─── Bootloop protection ───────────────────────────────────────────
-# If boot fails twice in a row, disable the module.
+# Marker left from previous boot => that boot never reached service.sh success.
+mkdir -p "${TG_STATE}" 2>/dev/null
+
 if [ -f "${BOOT_MARKER}" ]; then
-    # Marker exists from previous boot = previous boot may have failed
-    BOOT_COUNT=$(cat "${BOOT_COUNT_FILE}" 2>/dev/null || echo "0")
+    BOOT_COUNT=$(cat "${BOOT_COUNT_FILE}" 2>/dev/null)
+    case "${BOOT_COUNT}" in
+        ''|*[!0-9]*) BOOT_COUNT=0 ;;
+    esac
     BOOT_COUNT=$(( BOOT_COUNT + 1 ))
     echo "${BOOT_COUNT}" > "${BOOT_COUNT_FILE}" 2>/dev/null
 
+    # Two consecutive incomplete boots → disable (stock thermal returns after reboot)
     if [ "${BOOT_COUNT}" -ge 2 ]; then
-        # Two consecutive unclean boots — disable module
-        touch "${FAILSAFE_DISABLE}" 2>/dev/null
+        disable_module
         rm -f "${BOOT_MARKER}" 2>/dev/null
         echo "0" > "${BOOT_COUNT_FILE}" 2>/dev/null
-        # Also create Magisk/KSU disable flag
-        touch "/data/adb/modules/thermalguard/disable" 2>/dev/null
         exit 0
     fi
 else
-    # First boot (or marker was cleared) — reset counter
     echo "0" > "${BOOT_COUNT_FILE}" 2>/dev/null
 fi
 
-# Create/update boot marker (will be cleared by service.sh after successful boot)
+# Mark boot in progress. Cleared by service.sh only after daemon health check.
 date +%s > "${BOOT_MARKER}" 2>/dev/null
 
-# ─── Early state init ──────────────────────────────────────────────
-mkdir -p "${TG_STATE}" 2>/dev/null
-mkdir -p "${TGDIR}/logs" 2>/dev/null
-
-# Ensure zone state files exist
+# Minimal state init (no sysfs)
 [ -f "${TG_STATE}/current_zone" ] || echo "normal" > "${TG_STATE}/current_zone"
 [ -f "${TG_STATE}/prev_zone" ] || echo "normal" > "${TG_STATE}/prev_zone"
 
-# ─── Early failsafe: restore originals if previous session left locks ──
-if [ -f "${TG_STATE}/lockout_until" ]; then
-    LOCKOUT=$(cat "${TG_STATE}/lockout_until" 2>/dev/null || echo "0")
-    NOW=$(date +%s 2>/dev/null || echo 0)
-    if [ "${NOW}" -lt "${LOCKOUT}" ]; then
-        # Still in lockout — run failsafe to ensure clean state
-        if [ -f "${TG_BIN}/failsafe.sh" ]; then
-            sh "${TG_BIN}/failsafe.sh" "boot_lockout_check" 2>/dev/null
-        fi
-    fi
-fi
-
-# post-fs-data exits here — service.sh handles the main daemon
+# NO failsafe, NO sysfs writes in post-fs-data.
 exit 0
