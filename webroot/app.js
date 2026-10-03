@@ -5,6 +5,12 @@
 (function () {
     'use strict';
 
+    // className pada elemen SVG bersifat read-only (SVGAnimatedString) dan melempar
+    // TypeError di strict mode. setAttribute('class') aman untuk HTML maupun SVG.
+    function setClass(el, cls) {
+        if (el) el.setAttribute('class', cls);
+    }
+
     // ── Module paths ──
     const DATA_STATUS = '/data/adb/thermalguard/status.json';
     const MOD_STATUS = '/data/adb/modules/thermalguard/status.json';
@@ -115,7 +121,7 @@
     }
 
     async function pollStatus() {
-        if (polling) return; // cegah polling tumpang-tindih
+        if (polling) return;
         polling = true;
         try {
             const raw = await readStatusRaw();
@@ -147,7 +153,7 @@
         const d = document.getElementById('diag-daemon');
         if (d) {
             d.textContent = 'offline';
-            d.className = 'diag-bad';
+            setClass(d, 'diag-bad');
         }
         const s = document.getElementById('diag-sensors');
         if (s) s.innerHTML = `<div class="diag-empty">${escapeHtml(msg)}</div>`;
@@ -156,7 +162,7 @@
         const gt = document.getElementById('gauge-temp');
         if (gt) {
             gt.textContent = '--°';
-            gt.className = 'gauge-temp zone-critical';
+            setClass(gt, 'gauge-temp zone-critical');
         }
         const gz = document.getElementById('gauge-zone');
         if (gz) gz.textContent = 'No data';
@@ -228,11 +234,11 @@
             } else {
                 gaugeTemp.textContent = '--°';
             }
-            gaugeTemp.className = `gauge-temp zone-${zone}`;
+            setClass(gaugeTemp, `gauge-temp zone-${zone}`);
         }
         if (gaugeZone) {
             gaugeZone.textContent = zoneMeta.label;
-            gaugeZone.className = `gauge-zone zone-${zone}`;
+            setClass(gaugeZone, `gauge-zone zone-${zone}`);
         }
         if (gaugeFill) {
             const maxTemp = zoneMeta.gaugeMax || 45;
@@ -240,7 +246,7 @@
             const circumference = 2 * Math.PI * 88;
             const offset = circumference * (1 - pct);
             gaugeFill.style.strokeDashoffset = offset;
-            gaugeFill.className = `gauge-fill zone-${zone}`;
+            setClass(gaugeFill, `gauge-fill zone-${zone}`);
         }
 
         const ring = document.getElementById('gauge-ring');
@@ -277,23 +283,23 @@
         if (el) {
             if (num > 0) {
                 el.textContent = `${num}°`;
-                el.className = `sensor-value zone-${ok ? zone : 'normal'}`;
+                setClass(el, `sensor-value zone-${ok ? zone : 'normal'}`);
             } else {
                 el.textContent = 'N/A';
-                el.className = 'sensor-value zone-critical';
+                setClass(el, 'sensor-value zone-critical');
             }
         }
         if (meta) {
             if (ok && sensor && sensor.path) {
                 const t = sensor.type ? ` · ${sensor.type}` : '';
                 meta.textContent = `ok${t}`;
-                meta.className = 'sensor-meta ok';
+                setClass(meta, 'sensor-meta ok');
             } else if (sensor && sensor.path) {
                 meta.textContent = 'no reading';
-                meta.className = 'sensor-meta warn';
+                setClass(meta, 'sensor-meta warn');
             } else {
                 meta.textContent = 'not found';
-                meta.className = 'sensor-meta bad';
+                setClass(meta, 'sensor-meta bad');
             }
             if (sensor && sensor.path) meta.title = sensor.path;
         }
@@ -318,13 +324,13 @@
         if (daemon) {
             if (age >= 0 && age <= 15) {
                 daemon.textContent = 'running';
-                daemon.className = 'diag-ok';
+                setClass(daemon, 'diag-ok');
             } else if (age >= 0 && age <= 60) {
                 daemon.textContent = `lagging (${age}s)`;
-                daemon.className = 'diag-warn';
+                setClass(daemon, 'diag-warn');
             } else {
                 daemon.textContent = lu > 0 ? `stale (${age}s)` : 'no data';
-                daemon.className = 'diag-bad';
+                setClass(daemon, 'diag-bad');
             }
         }
         if (updated) {
@@ -378,7 +384,6 @@
 
         await ksExec(`echo '${profile}' > "${PROFILE_REQUEST}" 2>/dev/null`);
         await ksExec(`echo '${profile}' > "/data/adb/modules/thermalguard/state/profile_request" 2>/dev/null`);
-        // Also refresh env so daemon can re-apply overlays
         await ksExec(`sed -i 's/^PROFILE=.*/PROFILE=${profile}/' "${PROFILE_ENV}" 2>/dev/null || true`);
 
         showToast('Profile saved');
@@ -460,12 +465,11 @@
             `UPDATED=${Math.floor(Date.now() / 1000)}`
         ].filter(Boolean).join('\n') + '\n';
 
-        const envPath = PROFILE_ENV;
-        await ksExec(`printf '%s' '${env.replace(/'/g, "'\\''")}' > "${envPath}" 2>/dev/null`);
+        await ksExec(`printf '%s' '${env.replace(/'/g, "'\\''")}' > "${PROFILE_ENV}" 2>/dev/null`);
         await ksExec(`echo '${editingTab}' > "${PROFILE_REQUEST}" 2>/dev/null`);
         await ksExec(`echo '${editingTab}' > "/data/adb/modules/thermalguard/state/profile_request" 2>/dev/null`);
 
-        // Also keep JSON overlay for future use
+        // Keep JSON overlay for future use
         const overlayPath = '/data/adb/thermalguard/config/profile_overlays.json';
         const json = JSON.stringify(config, null, 2).replace(/'/g, "'\\''");
         await ksExec(`printf '%s' '${json}' > "${overlayPath}" 2>/dev/null`);

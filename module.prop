@@ -1,7 +1,7 @@
 id=thermalguard
 name=ThermalGuard
-version=v1.0.7
-versionCode=10007
+version=v1.0.8
+versionCode=10008
 author=RainInAugust26
-description=Graduated thermal throttling with emergency failsafe. v1.0.7: official KernelSU exec bridge + profile env overrides. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
+description=Graduated thermal throttling with emergency failsafe. v1.0.8: SVG-safe class updates in WebUI. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
 updateJson=
