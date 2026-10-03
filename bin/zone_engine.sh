@@ -21,15 +21,22 @@ TG_HYSTERESIS="${TG_HYSTERESIS:-2}"
 ABS_CPU_GPU_C=85
 ABS_BATT_C=48
 
-# zone_engine_resolve <device_temp_c> <cpu_die_temp_c> <batt_temp_c>
+# zone_engine_resolve <device_temp_c> <cpu_die_temp_c> <batt_temp_c> [gpu_die_temp_c]
+# device_temp = battery/skin (zone thresholds)
+# cpu_die / gpu_die / batt = absolute hard limits only
 zone_engine_resolve() {
     dev_temp="$1"
     cpu_die="$2"
     batt_temp="$3"
+    gpu_die="${4:-}"
     prev_zone=$(cat "${PREV_ZONE_FILE}" 2>/dev/null || echo "${ZONE_NORMAL}")
 
     # Absolute limits always force critical
     if [ -n "${cpu_die}" ] && [ "${cpu_die}" -ge "${ABS_CPU_GPU_C}" ]; then
+        echo "${ZONE_CRITICAL}"
+        return 0
+    fi
+    if [ -n "${gpu_die}" ] && [ "${gpu_die}" -ge "${ABS_CPU_GPU_C}" ]; then
         echo "${ZONE_CRITICAL}"
         return 0
     fi
@@ -41,7 +48,7 @@ zone_engine_resolve() {
         echo "${ZONE_CRITICAL}"
         return 0
     fi
-    # Missing/invalid sensor → critical (fail closed)
+    # Missing/invalid device sensor → critical (fail closed)
     if [ -z "${dev_temp}" ] || [ "${dev_temp}" = "0" ]; then
         echo "${ZONE_CRITICAL}"
         return 0

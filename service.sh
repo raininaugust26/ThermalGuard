@@ -20,6 +20,7 @@ SOC_ID_FILE="${TG_STATE}/soc_id"
 BOOT_MARKER="${TG_STATE}/boot_marker"
 TG_SAMSUNG_SAFE="false"
 TG_FIRST_HEALTHY="0"
+zone_ref_src="none"
 
 # ─── Device safety profile ─────────────────────────────────────────
 # Samsung OneUI thermal-engine is aggressive. Writing trip points or
@@ -145,67 +146,6 @@ read_battery_temp() {
     fi
 }
 
-# find_thermal_zone <type_regex> — first matching zone with a plausible temp
-find_thermal_zone() {
-    local type_regex="$1"
-    local best_path="" best_score=0
-    local tz_dir tz_type raw score
-    for tz_dir in /sys/class/thermal/thermal_zone*; do
-        [ -d "${tz_dir}" ] || continue
-        tz_type=$(cat "${tz_dir}/type" 2>/dev/null || echo "")
-        [ -n "${tz_type}" ] || continue
-        echo "${tz_type}" | grep -qiE "${type_regex}" || continue
-        raw=$(cat "${tz_dir}/temp" 2>/dev/null || echo "")
-        case "${raw}" in
-            ''|*[!0-9-]*) score=0 ;;
-            *)
-                # millidegrees or degrees; prefer non-zero
-                if [ "${raw}" -gt 1000 ]; then
-                    score=$(( raw / 1000 ))
-                else
-                    score="${raw}"
-                fi
-                ;;
-        esac
-        if [ "${score}" -gt 5 ] && [ "${score}" -lt 120 ]; then
-            echo "${tz_dir}/temp"
-            return 0
-        fi
-        if [ "${score}" -gt "${best_score}" ]; then
-            best_score="${score}"
-            best_path="${tz_dir}/temp"
-        fi
-    done
-    if [ -n "${best_path}" ]; then
-        echo "${best_path}"
-        return 0
-    fi
-    echo ""
-    return 1
-}
-
-# find_thermal_zone_by_name <regex> — returns "path|type" or empty
-find_thermal_zone_meta() {
-    local type_regex="$1"
-    local tz_dir tz_type raw
-    for tz_dir in /sys/class/thermal/thermal_zone*; do
-        [ -d "${tz_dir}" ] || continue
-        tz_type=$(cat "${tz_dir}/type" 2>/dev/null || echo "")
-        echo "${tz_type}" | grep -qiE "${type_regex}" || continue
-        raw=$(cat "${tz_dir}/temp" 2>/dev/null || echo "0")
-        case "${raw}" in
-            ''|*[!0-9-]*) raw=0 ;;
-        esac
-        if [ "${raw}" -gt 1000 ]; then raw=$(( raw / 1000 )); fi
-        if [ "${raw}" -gt 5 ] && [ "${raw}" -lt 120 ]; then
-            echo "${tz_dir}/temp|${tz_type}"
-            return 0
-        fi
-    done
-    echo ""
-    return 1
-}
-
 # dump_thermal_zones → sensors.txt (for diagnostics / share logs)
 dump_thermal_zones() {
     local out="${TGDIR}/logs/sensors.txt"
@@ -251,11 +191,67 @@ json_num() {
     esac
 }
 
+# conf_val <file> <KEY> — read KEY=value, strip quotes (conf files use KEY="value")
+conf_val() {
+    grep "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//'
+}
+
+# find_hottest_zone <type_regex> — hottest matching zone → "path|type|temp_c"
+# Used for multi-core CPU (cpu-1-0..3, cpuss-*) and GPU.
+find_hottest_zone() {
+    local type_regex="$1"
+    local best_path="" best_type="" best_c=0
+    local tz_dir tz_type raw c
+    for tz_dir in /sys/class/thermal/thermal_zone*; do
+        [ -d "${tz_dir}" ] || continue
+        tz_type=$(cat "${tz_dir}/type" 2>/dev/null || echo "")
+        [ -n "${tz_type}" ] || continue
+        echo "${tz_type}" | grep -qiE "${type_regex}" || continue
+        raw=$(cat "${tz_dir}/temp" 2>/dev/null || echo "")
+        case "${raw}" in
+            ''|*[!0-9-]*) c=0 ;;
+            *)
+                if [ "${raw}" -gt 1000 ]; then
+                    c=$(( raw / 1000 ))
+                else
+                    c="${raw}"
+                fi
+                ;;
+        esac
+        # Accept plausible die/board temps; ignore garbage
+        if [ "${c}" -ge 1 ] && [ "${c}" -le 119 ] && [ "${c}" -gt "${best_c}" ]; then
+            best_c="${c}"
+            best_path="${tz_dir}/temp"
+            best_type="${tz_type}"
+        fi
+    done
+    if [ -n "${best_path}" ]; then
+        echo "${best_path}|${best_type}|${best_c}"
+        return 0
+    fi
+    echo "||"
+    return 1
+}
+
+# find_thermal_zone_meta <regex> — first plausible zone → "path|type"
+find_thermal_zone_meta() {
+    meta=$(find_hottest_zone "$1") || true
+    path="${meta%%|*}"
+    rest="${meta#*|}"
+    type="${rest%%|*}"
+    if [ -n "${path}" ]; then
+        echo "${path}|${type}"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
 # ─── SoC config loading ────────────────────────────────────────────
 SOC_ID="unknown"
 SOC_LABEL=""
-# Wide regexes: Qualcomm TSens, Samsung cpu-N-M-usr, MTK, Mali, etc.
-SOC_CPU_TYPE_REGEX="cpu|tsens|cluster|core|soc|msoc|cpu-"
+# Wide defaults (used if conf missing or values empty after quote strip)
+SOC_CPU_TYPE_REGEX="cpu|tsens|cluster|core|cpuss|soc|msoc"
 SOC_GPU_TYPE_REGEX="gpu|adreno|mali|kgsl"
 SOC_SKIN_TYPE_REGEX="skin|quiet|case|back|pa_therm|shell|wifi"
 SOC_BATT_TYPE_REGEX="battery|batt"
@@ -263,18 +259,17 @@ if [ -f "${SOC_ID_FILE}" ]; then
     SOC_ID=$(cat "${SOC_ID_FILE}" 2>/dev/null || echo "unknown")
 fi
 if [ -f "${TG_SOC_CONF}" ]; then
-    conf_cpu=$(grep "^THERMAL_TYPE_CPU=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
-    conf_gpu=$(grep "^THERMAL_TYPE_GPU=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
-    conf_skin=$(grep "^THERMAL_TYPE_SKIN=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
-    conf_batt=$(grep "^THERMAL_TYPE_BATT=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
-    conf_label=$(grep "^SOC_LABEL=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
+    conf_cpu=$(conf_val "${TG_SOC_CONF}" "THERMAL_TYPE_CPU")
+    conf_gpu=$(conf_val "${TG_SOC_CONF}" "THERMAL_TYPE_GPU")
+    conf_skin=$(conf_val "${TG_SOC_CONF}" "THERMAL_TYPE_SKIN")
+    conf_batt=$(conf_val "${TG_SOC_CONF}" "THERMAL_TYPE_BATT")
+    conf_label=$(conf_val "${TG_SOC_CONF}" "SOC_LABEL")
     [ -n "${conf_cpu}" ] && SOC_CPU_TYPE_REGEX="${conf_cpu}"
     [ -n "${conf_gpu}" ] && SOC_GPU_TYPE_REGEX="${conf_gpu}"
     [ -n "${conf_skin}" ] && SOC_SKIN_TYPE_REGEX="${conf_skin}"
     [ -n "${conf_batt}" ] && SOC_BATT_TYPE_REGEX="${conf_batt}"
     [ -n "${conf_label}" ] && SOC_LABEL="${conf_label}"
 fi
-# Strip optional quotes from label
 SOC_LABEL=$(echo "${SOC_LABEL}" | sed 's/^"//;s/"$//')
 if [ -z "${SOC_LABEL}" ]; then
     case "${SOC_ID}" in
@@ -298,25 +293,31 @@ SKIN_TEMP_PATH=""
 SKIN_TEMP_TYPE=""
 BATT_NODE="/sys/class/power_supply/battery/temp"
 if [ -f "${TG_SOC_CONF}" ]; then
-    conf_batt_node=$(grep "^BATTERY_TEMP_NODE=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2- | sed 's/^"//;s/"$//')
+    conf_batt_node=$(conf_val "${TG_SOC_CONF}" "BATTERY_TEMP_NODE")
     [ -n "${conf_batt_node}" ] && BATT_NODE="${conf_batt_node}"
 fi
 
 resolve_sensors() {
-    meta=$(find_thermal_zone_meta "${SOC_CPU_TYPE_REGEX}")
+    # CPU: hottest among cpu-*/cpuss-*/tsens etc. (A05s: cpu-1-0..3, cpuss-0..2)
+    meta=$(find_hottest_zone "${SOC_CPU_TYPE_REGEX}")
     CPU_TEMP_PATH="${meta%%|*}"
-    CPU_TEMP_TYPE="${meta#*|}"
-    [ "${CPU_TEMP_PATH}" = "${meta}" ] && CPU_TEMP_PATH=""
+    _rest="${meta#*|}"
+    CPU_TEMP_TYPE="${_rest%%|*}"
+    [ -z "${CPU_TEMP_PATH}" ] && CPU_TEMP_TYPE=""
 
-    meta=$(find_thermal_zone_meta "${SOC_GPU_TYPE_REGEX}")
+    # GPU: hottest matching zone (A05s: type=gpu)
+    meta=$(find_hottest_zone "${SOC_GPU_TYPE_REGEX}")
     GPU_TEMP_PATH="${meta%%|*}"
-    GPU_TEMP_TYPE="${meta#*|}"
-    [ "${GPU_TEMP_PATH}" = "${meta}" ] && GPU_TEMP_PATH=""
+    _rest="${meta#*|}"
+    GPU_TEMP_TYPE="${_rest%%|*}"
+    [ -z "${GPU_TEMP_PATH}" ] && GPU_TEMP_TYPE=""
 
-    meta=$(find_thermal_zone_meta "${SOC_SKIN_TYPE_REGEX}")
+    # Skin: prefer quiet-therm / skin-like
+    meta=$(find_hottest_zone "${SOC_SKIN_TYPE_REGEX}")
     SKIN_TEMP_PATH="${meta%%|*}"
-    SKIN_TEMP_TYPE="${meta#*|}"
-    [ "${SKIN_TEMP_PATH}" = "${meta}" ] && SKIN_TEMP_PATH=""
+    _rest="${meta#*|}"
+    SKIN_TEMP_TYPE="${_rest%%|*}"
+    [ -z "${SKIN_TEMP_PATH}" ] && SKIN_TEMP_TYPE=""
 
     # Battery node fallbacks
     if [ ! -f "${BATT_NODE}" ]; then
@@ -693,6 +694,7 @@ update_status() {
     "battery": { "ok": ${batt_ok}, "temp_c": ${batt_n}, "path": "${BATT_NODE}", "type": "power_supply" },
     "skin": { "ok": ${skin_ok}, "temp_c": ${skin_n}, "path": "${SKIN_TEMP_PATH}", "type": "${SKIN_TEMP_TYPE}" }
   },
+  "zone_ref": "${zone_ref_src}",
   "thresholds": {
     "push_c": ${TG_PUSH_MAX},
     "limit_c": ${TG_LIMIT_MAX},
@@ -739,6 +741,8 @@ main() {
     dump_thermal_zones
 
     log "Sensors: cpu=${CPU_TEMP_PATH:-none}(${CPU_TEMP_TYPE:-n/a}) gpu=${GPU_TEMP_PATH:-none}(${GPU_TEMP_TYPE:-n/a}) skin=${SKIN_TEMP_PATH:-none}(${SKIN_TEMP_TYPE:-n/a}) batt=${BATT_NODE}"
+    log "Regex cpu='${SOC_CPU_TYPE_REGEX}' gpu='${SOC_GPU_TYPE_REGEX}' skin='${SOC_SKIN_TYPE_REGEX}'"
+    log "Zone ref: battery preferred (PRD device temp); CPU/GPU die only for 85C abs limit"
 
     while true; do
         # Check lockout (failsafe active)
@@ -773,22 +777,29 @@ main() {
 
         # ── Read temperatures ──
         local dev_temp="" cpu_temp="" gpu_temp="" batt_temp="" skin_temp=""
+        zone_ref_src=""
 
         cpu_temp=$(read_temp_mc "${CPU_TEMP_PATH}" 2>/dev/null || echo "")
         gpu_temp=$(read_temp_mc "${GPU_TEMP_PATH}" 2>/dev/null || echo "")
         batt_temp=$(read_battery_temp 2>/dev/null || echo "")
         skin_temp=$(read_temp_mc "${SKIN_TEMP_PATH}" 2>/dev/null || echo "")
 
-        # Device temp: prefer CPU die, fall back to skin, then battery
-        if [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -gt 0 ]; then
-            dev_temp="${cpu_temp}"
+        # PRD: zone thresholds use DEVICE temp (battery/skin), NOT CPU die.
+        # CPU/GPU die only feed absolute limits (85°C).
+        # Samsung quiet-therm often reads ~10°C hotter than battery → false Critical.
+        if [ -n "${batt_temp}" ] && [ "${batt_temp}" -gt 0 ]; then
+            dev_temp="${batt_temp}"
+            zone_ref_src="battery"
         elif [ -n "${skin_temp}" ] && [ "${skin_temp}" -gt 0 ]; then
             dev_temp="${skin_temp}"
-        elif [ -n "${batt_temp}" ] && [ "${batt_temp}" -gt 0 ]; then
-            dev_temp="${batt_temp}"
+            zone_ref_src="skin"
+        elif [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -gt 0 ]; then
+            # Last resort only — die temp is not a device-temp proxy
+            dev_temp="${cpu_temp}"
+            zone_ref_src="cpu_fallback"
         else
-            # No valid sensor — fail-safe
             dev_temp=""
+            zone_ref_src="none"
         fi
 
         # ── Resolve zone ──
@@ -802,10 +813,15 @@ main() {
                 . "${TG_BIN}/zone_engine.sh" 2>/dev/null
             fi
             if command -v zone_engine_resolve >/dev/null 2>&1; then
-                new_zone=$(zone_engine_resolve "${dev_temp}" "${cpu_temp:-0}" "${batt_temp:-0}")
+                # abs limits: cpu die, battery; zone thresholds: device ref (battery/skin)
+                new_zone=$(zone_engine_resolve "${dev_temp}" "${cpu_temp:-0}" "${batt_temp:-0}" "${gpu_temp:-0}")
             else
                 # Inline fallback thresholds (no hysteresis)
-                if [ "${dev_temp}" -ge "${TG_CRITICAL_MAX}" ]; then
+                if [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -ge 85 ]; then
+                    new_zone="critical"
+                elif [ -n "${batt_temp}" ] && [ "${batt_temp}" -ge 48 ]; then
+                    new_zone="critical"
+                elif [ "${dev_temp}" -ge "${TG_CRITICAL_MAX}" ]; then
                     new_zone="critical"
                 elif [ "${dev_temp}" -ge "${TG_LIMIT_MAX}" ]; then
                     new_zone="limit"
