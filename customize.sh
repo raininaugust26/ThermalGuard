@@ -123,6 +123,13 @@ ui_print "- SoC detected: ${SOC_ID}"
 
 # Manufacturer (Samsung needs conservative runtime behavior)
 MFG=$(getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]')
+case "${SOC_ID}" in
+    qcom) SOC_LABEL="Qualcomm Snapdragon" ;;
+    mtk) SOC_LABEL="MediaTek" ;;
+    exynos) SOC_LABEL="Samsung Exynos" ;;
+    tensor) SOC_LABEL="Google Tensor" ;;
+    *) SOC_LABEL="Unknown SoC" ;;
+esac
 case "${MFG}" in
     *samsung*)
         ui_print "- Manufacturer: Samsung"
@@ -148,6 +155,9 @@ mkdir -p "${TGDIR}" 2>/dev/null
 mkdir -p "${TG_BACKUP}" 2>/dev/null
 mkdir -p "${TG_STATE}" 2>/dev/null
 mkdir -p "${TGDIR}/logs" 2>/dev/null
+
+# Keep module.prop in data dir (WebUI version display)
+cp "${MODDIR}/module.prop" "${TGDIR}/module.prop" 2>/dev/null
 
 # Copy soc conf for detected chip
 if [ "${SOC_ID}" != "unknown" ] && [ -f "${TG_SOC}/${SOC_ID}.conf" ]; then
@@ -305,16 +315,25 @@ echo "0" > "${TG_STATE}/boot_count" 2>/dev/null
 cat > "${TGDIR}/status.json" << EOF
 {
   "module": "thermalguard",
-  "version": "1.0.0",
+  "version": "v1.0.2",
   "soc": "${SOC_ID}",
+  "soc_label": "${SOC_LABEL:-Unknown}",
+  "manufacturer": "${MFG:-unknown}",
   "read_only": $([ "${SOC_ID}" = "unknown" ] && echo "true" || echo "false"),
   "zone": "normal",
+  "daemon_ok": false,
   "temps": {
     "device_c": 0,
     "cpu_c": 0,
     "gpu_c": 0,
     "battery_c": 0,
     "skin_c": 0
+  },
+  "sensors": {
+    "cpu": { "ok": false, "temp_c": 0, "path": "", "type": "" },
+    "gpu": { "ok": false, "temp_c": 0, "path": "", "type": "" },
+    "battery": { "ok": false, "temp_c": 0, "path": "", "type": "" },
+    "skin": { "ok": false, "temp_c": 0, "path": "", "type": "" }
   },
   "profile": "auto",
   "failsafe_active": false,

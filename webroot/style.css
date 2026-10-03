@@ -332,6 +332,128 @@ body {
     letter-spacing: -0.02em;
 }
 
+/* ── Diagnostics ── */
+.diag-container {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    margin-bottom: calc(var(--space) * 2);
+    box-shadow: var(--shadow);
+}
+
+.diag-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.diag-title {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.diag-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.diag-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: var(--radius-sm);
+}
+
+@media (prefers-color-scheme: light) {
+    .diag-item { background: rgba(0, 0, 0, 0.04); }
+}
+
+.diag-item span {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.diag-item strong {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    word-break: break-word;
+}
+
+.diag-sensors {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.diag-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto;
+    gap: 2px 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+}
+
+.diag-row span {
+    color: var(--text-dim);
+    font-family: var(--font-display);
+    font-weight: 600;
+}
+
+.diag-row strong {
+    font-family: var(--font-display);
+    text-align: right;
+}
+
+.diag-row code {
+    grid-column: 1 / -1;
+    font-size: 10px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.diag-ok { color: var(--normal); }
+.diag-warn { color: var(--push); }
+.diag-bad { color: var(--critical); }
+
+.diag-empty {
+    padding: 12px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.sensor-meta {
+    font-family: var(--font-display);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.sensor-meta.ok { color: var(--normal); }
+.sensor-meta.warn { color: var(--push); }
+.sensor-meta.bad { color: var(--critical); }
+
 /* ── Graph ── */
 .graph-container {
     background: var(--panel);

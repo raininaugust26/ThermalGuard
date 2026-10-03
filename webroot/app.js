@@ -5,12 +5,16 @@
 (function () {
     'use strict';
 
-    // ── Module paths ──
-    const MODULE_DIR = '/data/adb/thermalguard';
-    const STATUS_FILE = `${MODULE_DIR}/status.json`;
-    const STATE_DIR = `${MODULE_DIR}/state`;
+    // ── Module paths (try several — WebUI bridge path rules vary) ──
+    const STATUS_PATHS = [
+        '/data/adb/thermalguard/status.json',
+        '/data/adb/modules/thermalguard/status.json'
+    ];
+    const STATE_DIR = '/data/adb/thermalguard/state';
     const PROFILE_REQUEST = `${STATE_DIR}/profile_request`;
     const HISTORY_FILE = `${STATE_DIR}/history.log`;
+    const SENSORS_LOG = '/data/adb/thermalguard/logs/sensors.txt';
+    const DAEMON_LOG = '/data/adb/thermalguard/logs/daemon.log';
 
     // ── Zone metadata ──
     const ZONES = {
@@ -84,31 +88,79 @@
     };
 
     // ── Status polling ──
+    async function readStatusRaw() {
+        for (const path of STATUS_PATHS) {
+            const raw = await ksReadFile(path);
+            if (raw && String(raw).trim().length > 2) return raw;
+        }
+        return null;
+    }
+
     async function pollStatus() {
         try {
-            const raw = await ksReadFile(STATUS_FILE);
-            if (!raw) return;
+            const raw = await readStatusRaw();
+            if (!raw) {
+                renderStatusError('No status.json found. Is the module installed and booted?');
+                return;
+            }
             const data = JSON.parse(raw);
             statusData = data;
             renderStatus(data);
         } catch (e) {
-            // ignore parse errors on transient writes
+            renderStatusError('Invalid status.json: ' + (e && e.message ? e.message : e));
         }
+    }
+
+    window.refreshStatus = function () {
+        tempHistory = [];
+        pollStatus();
+        showToast('Status refreshed');
+    };
+
+    function renderStatusError(msg) {
+        const socBadge = document.getElementById('soc-badge');
+        if (socBadge) socBadge.textContent = 'NO DATA';
+        const el = document.getElementById('diag-soc');
+        if (el) el.textContent = '—';
+        const d = document.getElementById('diag-daemon');
+        if (d) {
+            d.textContent = 'offline';
+            d.className = 'zone-critical';
+        }
+        const s = document.getElementById('diag-sensors');
+        if (s) s.innerHTML = `<div class="diag-empty">${escapeHtml(msg)}</div>`;
+        const gt = document.getElementById('gauge-temp');
+        if (gt) {
+            gt.textContent = '--°';
+            gt.className = 'gauge-temp zone-critical';
+        }
+        const gz = document.getElementById('gauge-zone');
+        if (gz) gz.textContent = 'No data';
     }
 
     function renderStatus(data) {
         // SoC badge
         const socBadge = document.getElementById('soc-badge');
         if (socBadge) {
-            socBadge.textContent = data.soc ? data.soc.toUpperCase() : 'UNKNOWN';
+            const label = data.soc_label || data.soc || 'UNKNOWN';
+            socBadge.textContent = String(label).toUpperCase();
+            socBadge.title = `id=${data.soc || '?'} mfg=${data.manufacturer || '?'}`;
         }
 
-        // Read-only mode
+        // Read-only / Samsung-safe
         readOnlyMode = !!data.read_only;
         const roBanner = document.getElementById('readonly-banner');
         const roStatus = document.getElementById('sec-readonly-status');
         if (roBanner) roBanner.classList.toggle('hidden', !readOnlyMode);
         if (roStatus) roStatus.textContent = readOnlyMode ? 'Active' : 'Inactive';
+
+        const modeEl = document.getElementById('diag-mode');
+        if (modeEl) {
+            if (data.samsung_safe && data.read_only) modeEl.textContent = 'Samsung-safe + RO';
+            else if (data.samsung_safe) modeEl.textContent = 'Samsung-safe';
+            else if (data.read_only) modeEl.textContent = 'Read-only';
+            else modeEl.textContent = 'Full';
+        }
 
         // Failsafe banner
         const critBanner = document.getElementById('critical-banner');
@@ -134,10 +186,14 @@
         const gaugeZone = document.getElementById('gauge-zone');
         const gaugeFill = document.getElementById('gauge-fill');
 
-        const deviceTemp = (data.temps && data.temps.device_c) || 0;
+        const deviceTemp = (data.temps && Number(data.temps.device_c)) || 0;
 
         if (gaugeTemp) {
-            gaugeTemp.textContent = `${deviceTemp}°`;
+            if (deviceTemp > 0) {
+                gaugeTemp.textContent = `${deviceTemp}°`;
+            } else {
+                gaugeTemp.textContent = '--°';
+            }
             gaugeTemp.className = `gauge-temp zone-${zone}`;
         }
         if (gaugeZone) {
@@ -146,49 +202,142 @@
         }
         if (gaugeFill) {
             const maxTemp = zoneMeta.gaugeMax || 45;
-            const pct = Math.min(deviceTemp / maxTemp, 1);
-            const circumference = 2 * Math.PI * 88; // r=88
+            const pct = deviceTemp > 0 ? Math.min(deviceTemp / maxTemp, 1) : 0;
+            const circumference = 2 * Math.PI * 88;
             const offset = circumference * (1 - pct);
             gaugeFill.style.strokeDashoffset = offset;
             gaugeFill.className = `gauge-fill zone-${zone}`;
         }
 
-        // Pulse animation on zone transition (once)
         const ring = document.getElementById('gauge-ring');
         if (ring && zone !== prevZone && (zone === 'limit' || zone === 'push')) {
             ring.classList.remove('pulse');
-            // Force reflow
             void ring.offsetWidth;
             ring.classList.add('pulse');
         }
 
-        // Sensor values
+        // Sensors + meta
         const temps = data.temps || {};
-        setSensorValue('cpu-temp', 'sensor-cpu', temps.cpu_c, zone);
-        setSensorValue('gpu-temp', 'sensor-gpu', temps.gpu_c, zone);
-        setSensorValue('batt-temp', 'sensor-batt', temps.battery_c, 'normal');
-        setSensorValue('skin-temp', 'sensor-skin', temps.skin_c, zone);
+        const sensors = data.sensors || {};
+        renderSensor('cpu', 'cpu-temp', 'cpu-meta', temps.cpu_c, sensors.cpu, zone);
+        renderSensor('gpu', 'gpu-temp', 'gpu-meta', temps.gpu_c, sensors.gpu, zone);
+        renderSensor('batt', 'batt-temp', 'batt-meta', temps.battery_c, sensors.battery, 'normal');
+        renderSensor('skin', 'skin-temp', 'skin-meta', temps.skin_c, sensors.skin, zone);
 
-        // Profile pill
+        // Diagnostics
+        renderDiagnostics(data);
+
         if (data.profile) activeProfile = data.profile;
         updateProfileButtons(activeProfile);
 
-        // History graph data point
         const nowSec = Math.floor(Date.now() / 1000);
         tempHistory.push({ t: nowSec, temp: deviceTemp });
-        // Keep last 10 minutes (300 points at 2s)
         if (tempHistory.length > 300) tempHistory = tempHistory.slice(-300);
         drawGraph();
     }
 
-    function setSensorValue(valueId, cardId, value, zone) {
+    function renderSensor(key, valueId, metaId, value, sensor, zone) {
         const el = document.getElementById(valueId);
-        const card = document.getElementById(cardId);
+        const meta = document.getElementById(metaId);
+        const num = Number(value) || 0;
+        const ok = sensor ? !!sensor.ok : num > 0;
+
+        if (el) {
+            if (num > 0) {
+                el.textContent = `${num}°`;
+                el.className = `sensor-value zone-${ok ? zone : 'normal'}`;
+            } else {
+                el.textContent = 'N/A';
+                el.className = 'sensor-value zone-critical';
+            }
+        }
+        if (meta) {
+            if (ok && sensor && sensor.path) {
+                const t = sensor.type ? ` · ${sensor.type}` : '';
+                meta.textContent = `ok${t}`;
+                meta.className = 'sensor-meta ok';
+            } else if (sensor && sensor.path) {
+                meta.textContent = 'no reading';
+                meta.className = 'sensor-meta warn';
+            } else {
+                meta.textContent = 'not found';
+                meta.className = 'sensor-meta bad';
+            }
+            if (sensor && sensor.path) meta.title = sensor.path;
+        }
+    }
+
+    function renderDiagnostics(data) {
+        const soc = document.getElementById('diag-soc');
+        const mfg = document.getElementById('diag-mfg');
+        const daemon = document.getElementById('diag-daemon');
+        const updated = document.getElementById('diag-updated');
+        const version = document.getElementById('diag-version');
+        const list = document.getElementById('diag-sensors');
+
+        if (soc) soc.textContent = data.soc_label || data.soc || '—';
+        if (mfg) mfg.textContent = data.manufacturer || '—';
+        if (version) version.textContent = data.version || '—';
+
+        const now = Math.floor(Date.now() / 1000);
+        const lu = Number(data.last_update) || 0;
+        const age = lu > 0 ? now - lu : -1;
+
+        if (daemon) {
+            if (age >= 0 && age <= 15) {
+                daemon.textContent = 'running';
+                daemon.className = 'diag-ok';
+            } else if (age >= 0 && age <= 60) {
+                daemon.textContent = `lagging (${age}s)`;
+                daemon.className = 'diag-warn';
+            } else {
+                daemon.textContent = lu > 0 ? `stale (${age}s)` : 'no data';
+                daemon.className = 'diag-bad';
+            }
+        }
+        if (updated) {
+            updated.textContent = lu > 0 ? `${age >= 0 ? age : '?'}s ago` : 'never';
+        }
+
+        if (!list) return;
+        const sensors = data.sensors;
+        if (!sensors) {
+            list.innerHTML = '<div class="diag-empty">status.json has no sensors block (daemon old?)</div>';
+            return;
+        }
+
+        const rows = [
+            ['CPU', sensors.cpu],
+            ['GPU', sensors.gpu],
+            ['Battery', sensors.battery],
+            ['Skin', sensors.skin]
+        ];
+        let html = '';
+        for (const [name, s] of rows) {
+            if (!s) {
+                html += `<div class="diag-row"><span>${name}</span><strong class="diag-bad">missing</strong></div>`;
+                continue;
+            }
+            const okCls = s.ok ? 'diag-ok' : 'diag-bad';
+            const path = s.path || '—';
+            const type = s.type ? ` (${s.type})` : '';
+            html += `<div class="diag-row">
+                <span>${name}${type}</span>
+                <strong class="${okCls}">${s.ok ? s.temp_c + '°' : 'not found'}</strong>
+                <code>${escapeHtml(path)}</code>
+            </div>`;
+        }
+        list.innerHTML = html;
+    }
+
+    function setSensorValue(valueId, cardId, value, zone) {
+        // kept for compatibility; renderSensor is used
+        const el = document.getElementById(valueId);
         if (el) {
             if (value !== undefined && value !== null && value > 0) {
                 el.textContent = `${value}°`;
             } else {
-                el.textContent = '--°';
+                el.textContent = 'N/A';
             }
         }
     }
@@ -270,7 +419,7 @@
         }
 
         // Write to profiles.json via exec (merge approach: write overlay file)
-        const overlayPath = `${MODULE_DIR}/config/profile_overlays.json`;
+        const overlayPath = '/data/adb/thermalguard/config/profile_overlays.json';
         const json = JSON.stringify(config, null, 2);
         await ksWriteFile(overlayPath, json);
 
@@ -329,35 +478,34 @@
 
     // ── Share logs ──
     window.shareLogs = async function () {
-        const logs = await ksReadFile(`${MODULE_DIR}/logs/daemon.log`);
-        const status = await ksReadFile(STATUS_FILE);
+        const logs = await ksReadFile(DAEMON_LOG);
+        const sensors = await ksReadFile(SENSORS_LOG);
+        const status = await readStatusRaw();
         const soc = await ksReadFile(`${STATE_DIR}/soc_id`);
 
         const bundle = [
             '=== ThermalGuard Support Log ===',
-            `SoC: ${soc || 'unknown'}`,
             `Generated: ${new Date().toISOString()}`,
+            `SoC id: ${soc || 'unknown'}`,
             '',
             '--- status.json ---',
             status || '(empty)',
             '',
-            '--- daemon.log (last 50 lines) ---',
+            '--- logs/sensors.txt ---',
+            sensors || '(empty)',
+            '',
+            '--- logs/daemon.log (last 50 lines) ---',
             logs ? logs.split('\n').slice(-50).join('\n') : '(empty)',
             '',
-            '--- soc_id ---',
-            soc || 'unknown',
-            '',
-            '--- device info ---',
-            `Android: ${navigator.userAgent}`,
+            '--- device ---',
+            `UA: ${navigator.userAgent}`,
             ''
         ].join('\n');
 
-        // Try clipboard first
         try {
             await navigator.clipboard.writeText(bundle);
             showToast('Logs copied to clipboard');
         } catch (e) {
-            // Fallback: download
             const blob = new Blob([bundle], { type: 'text/plain' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');

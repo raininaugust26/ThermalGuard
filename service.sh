@@ -115,12 +115,16 @@ read_temp_mc() {
     fi
 }
 
-# read_battery_temp — battery temp in °C (power_supply reports 0.1°C units)
+# read_battery_temp — battery temp in °C (power_supply usually 0.1°C units)
 read_battery_temp() {
-    local path="/sys/class/power_supply/battery/temp"
+    local path="${BATT_NODE:-/sys/class/power_supply/battery/temp}"
     if [ ! -f "${path}" ] || [ ! -r "${path}" ]; then
-        echo ""
-        return 1
+        # last-resort thermal zone
+        local meta
+        meta=$(find_thermal_zone_meta "${SOC_BATT_TYPE_REGEX}")
+        path="${meta%%|*}"
+        [ "${path}" = "${meta}" ] && path=""
+        [ -n "${path}" ] && [ -f "${path}" ] || { echo ""; return 1; }
     fi
     local raw
     raw=$(cat "${path}" 2>/dev/null)
@@ -128,48 +132,199 @@ read_battery_temp() {
         echo ""
         return 1
     fi
-    # Usually in 0.1°C units (e.g. 360 = 36.0°C); sometimes already in °C
-    if [ "${raw}" -gt 100 ]; then
+    case "${raw}" in
+        *[!0-9-]*) echo ""; return 1 ;;
+    esac
+    # 0.1°C units (360=36.0) vs already °C vs millidegrees (36000)
+    if [ "${raw}" -gt 10000 ]; then
+        echo $(( raw / 1000 ))
+    elif [ "${raw}" -gt 100 ]; then
         echo $(( raw / 10 ))
     else
         echo "${raw}"
     fi
 }
 
-# find_thermal_zone <type_regex> — finds first thermal_zone matching type
+# find_thermal_zone <type_regex> — first matching zone with a plausible temp
 find_thermal_zone() {
     local type_regex="$1"
+    local best_path="" best_score=0
+    local tz_dir tz_type raw score
     for tz_dir in /sys/class/thermal/thermal_zone*; do
         [ -d "${tz_dir}" ] || continue
-        local tz_type
         tz_type=$(cat "${tz_dir}/type" 2>/dev/null || echo "")
-        if echo "${tz_type}" | grep -qiE "${type_regex}"; then
+        [ -n "${tz_type}" ] || continue
+        echo "${tz_type}" | grep -qiE "${type_regex}" || continue
+        raw=$(cat "${tz_dir}/temp" 2>/dev/null || echo "")
+        case "${raw}" in
+            ''|*[!0-9-]*) score=0 ;;
+            *)
+                # millidegrees or degrees; prefer non-zero
+                if [ "${raw}" -gt 1000 ]; then
+                    score=$(( raw / 1000 ))
+                else
+                    score="${raw}"
+                fi
+                ;;
+        esac
+        if [ "${score}" -gt 5 ] && [ "${score}" -lt 120 ]; then
             echo "${tz_dir}/temp"
             return 0
         fi
+        if [ "${score}" -gt "${best_score}" ]; then
+            best_score="${score}"
+            best_path="${tz_dir}/temp"
+        fi
     done
-    # Fallback: return empty
+    if [ -n "${best_path}" ]; then
+        echo "${best_path}"
+        return 0
+    fi
     echo ""
     return 1
 }
 
+# find_thermal_zone_by_name <regex> — returns "path|type" or empty
+find_thermal_zone_meta() {
+    local type_regex="$1"
+    local tz_dir tz_type raw
+    for tz_dir in /sys/class/thermal/thermal_zone*; do
+        [ -d "${tz_dir}" ] || continue
+        tz_type=$(cat "${tz_dir}/type" 2>/dev/null || echo "")
+        echo "${tz_type}" | grep -qiE "${type_regex}" || continue
+        raw=$(cat "${tz_dir}/temp" 2>/dev/null || echo "0")
+        case "${raw}" in
+            ''|*[!0-9-]*) raw=0 ;;
+        esac
+        if [ "${raw}" -gt 1000 ]; then raw=$(( raw / 1000 )); fi
+        if [ "${raw}" -gt 5 ] && [ "${raw}" -lt 120 ]; then
+            echo "${tz_dir}/temp|${tz_type}"
+            return 0
+        fi
+    done
+    echo ""
+    return 1
+}
+
+# dump_thermal_zones → sensors.txt (for diagnostics / share logs)
+dump_thermal_zones() {
+    local out="${TGDIR}/logs/sensors.txt"
+    {
+        echo "=== ThermalGuard sensor dump ==="
+        echo "date: $(date 2>/dev/null)"
+        echo "soc_id: ${SOC_ID}"
+        echo "soc_label: ${SOC_LABEL}"
+        echo "manufacturer: ${MFG}"
+        echo "samsung_safe: ${TG_SAMSUNG_SAFE}"
+        echo "read_only: ${TG_READ_ONLY}"
+        echo ""
+        echo "--- thermal zones ---"
+        for tz_dir in /sys/class/thermal/thermal_zone*; do
+            [ -d "${tz_dir}" ] || continue
+            echo "$(basename "${tz_dir}") type=$(cat "${tz_dir}/type" 2>/dev/null) temp=$(cat "${tz_dir}/temp" 2>/dev/null)"
+        done
+        echo ""
+        echo "--- battery ---"
+        for p in /sys/class/power_supply/battery/temp /sys/class/power_supply/battery/batt_temp; do
+            [ -f "${p}" ] && echo "${p}=$(cat "${p}" 2>/dev/null)"
+        done
+        echo ""
+        echo "--- cpu freq ---"
+        for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            [ -d "${p}" ] || continue
+            echo "$(basename "${p}") max=$(cat "${p}/scaling_max_freq" 2>/dev/null)"
+        done
+        echo ""
+        echo "--- selected paths ---"
+        echo "cpu=${CPU_TEMP_PATH:-none} (${CPU_TEMP_TYPE:-n/a})"
+        echo "gpu=${GPU_TEMP_PATH:-none} (${GPU_TEMP_TYPE:-n/a})"
+        echo "skin=${SKIN_TEMP_PATH:-none} (${SKIN_TEMP_TYPE:-n/a})"
+        echo "battery_node=${BATT_NODE:-none}"
+    } > "${out}" 2>/dev/null
+}
+
+# json_num <val> — force integer for JSON
+json_num() {
+    case "$1" in
+        ''|*[!0-9]*) echo 0 ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # ─── SoC config loading ────────────────────────────────────────────
 SOC_ID="unknown"
-SOC_CPU_TYPE_REGEX="cpu|tsens|cluster|core"
-SOC_GPU_TYPE_REGEX="gpu|adreno|mali"
+SOC_LABEL=""
+# Wide regexes: Qualcomm TSens, Samsung cpu-N-M-usr, MTK, Mali, etc.
+SOC_CPU_TYPE_REGEX="cpu|tsens|cluster|core|soc|msoc|cpu-"
+SOC_GPU_TYPE_REGEX="gpu|adreno|mali|kgsl"
+SOC_SKIN_TYPE_REGEX="skin|quiet|case|back|pa_therm|shell|wifi"
+SOC_BATT_TYPE_REGEX="battery|batt"
 if [ -f "${SOC_ID_FILE}" ]; then
     SOC_ID=$(cat "${SOC_ID_FILE}" 2>/dev/null || echo "unknown")
 fi
 if [ -f "${TG_SOC_CONF}" ]; then
-    # Extract type regexes from conf
-    conf_cpu=$(grep "^THERMAL_TYPE_CPU=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2)
-    conf_gpu=$(grep "^THERMAL_TYPE_GPU=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2)
+    conf_cpu=$(grep "^THERMAL_TYPE_CPU=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
+    conf_gpu=$(grep "^THERMAL_TYPE_GPU=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
+    conf_skin=$(grep "^THERMAL_TYPE_SKIN=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
+    conf_batt=$(grep "^THERMAL_TYPE_BATT=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
+    conf_label=$(grep "^SOC_LABEL=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2-)
     [ -n "${conf_cpu}" ] && SOC_CPU_TYPE_REGEX="${conf_cpu}"
     [ -n "${conf_gpu}" ] && SOC_GPU_TYPE_REGEX="${conf_gpu}"
+    [ -n "${conf_skin}" ] && SOC_SKIN_TYPE_REGEX="${conf_skin}"
+    [ -n "${conf_batt}" ] && SOC_BATT_TYPE_REGEX="${conf_batt}"
+    [ -n "${conf_label}" ] && SOC_LABEL="${conf_label}"
+fi
+# Strip optional quotes from label
+SOC_LABEL=$(echo "${SOC_LABEL}" | sed 's/^"//;s/"$//')
+if [ -z "${SOC_LABEL}" ]; then
+    case "${SOC_ID}" in
+        qcom) SOC_LABEL="Qualcomm Snapdragon" ;;
+        mtk) SOC_LABEL="MediaTek" ;;
+        exynos) SOC_LABEL="Samsung Exynos" ;;
+        tensor) SOC_LABEL="Google Tensor" ;;
+        *) SOC_LABEL="Unknown SoC" ;;
+    esac
 fi
 if [ "${SOC_ID}" = "unknown" ]; then
     TG_READ_ONLY=true
 fi
+
+# Resolve sensor paths once
+CPU_TEMP_PATH=""
+CPU_TEMP_TYPE=""
+GPU_TEMP_PATH=""
+GPU_TEMP_TYPE=""
+SKIN_TEMP_PATH=""
+SKIN_TEMP_TYPE=""
+BATT_NODE="/sys/class/power_supply/battery/temp"
+if [ -f "${TG_SOC_CONF}" ]; then
+    conf_batt_node=$(grep "^BATTERY_TEMP_NODE=" "${TG_SOC_CONF}" 2>/dev/null | cut -d= -f2- | sed 's/^"//;s/"$//')
+    [ -n "${conf_batt_node}" ] && BATT_NODE="${conf_batt_node}"
+fi
+
+resolve_sensors() {
+    meta=$(find_thermal_zone_meta "${SOC_CPU_TYPE_REGEX}")
+    CPU_TEMP_PATH="${meta%%|*}"
+    CPU_TEMP_TYPE="${meta#*|}"
+    [ "${CPU_TEMP_PATH}" = "${meta}" ] && CPU_TEMP_PATH=""
+
+    meta=$(find_thermal_zone_meta "${SOC_GPU_TYPE_REGEX}")
+    GPU_TEMP_PATH="${meta%%|*}"
+    GPU_TEMP_TYPE="${meta#*|}"
+    [ "${GPU_TEMP_PATH}" = "${meta}" ] && GPU_TEMP_PATH=""
+
+    meta=$(find_thermal_zone_meta "${SOC_SKIN_TYPE_REGEX}")
+    SKIN_TEMP_PATH="${meta%%|*}"
+    SKIN_TEMP_TYPE="${meta#*|}"
+    [ "${SKIN_TEMP_PATH}" = "${meta}" ] && SKIN_TEMP_PATH=""
+
+    # Battery node fallbacks
+    if [ ! -f "${BATT_NODE}" ]; then
+        for p in /sys/class/power_supply/battery/temp /sys/class/power_supply/bms/temp; do
+            [ -f "${p}" ] && BATT_NODE="${p}" && break
+        done
+    fi
+}
 
 # ─── Read/write helpers for sysfs ──────────────────────────────────
 node_write() {
@@ -460,6 +615,7 @@ update_status() {
         local policy_name freq
         policy_name=$(basename "${policy_dir}")
         freq=$(cat "${policy_dir}/scaling_max_freq" 2>/dev/null || echo "0")
+        freq=$(json_num "${freq}")
         if [ "${first}" -eq 1 ]; then
             first=0
         else
@@ -471,7 +627,7 @@ update_status() {
 
     local gpu_freq=0
     if [ -f "/sys/class/kgsl/kgsl-3d0/max_gpuclk" ]; then
-        gpu_freq=$(cat "/sys/class/kgsl/kgsl-3d0/max_gpuclk" 2>/dev/null || echo "0")
+        gpu_freq=$(json_num "$(cat "/sys/class/kgsl/kgsl-3d0/max_gpuclk" 2>/dev/null)")
     fi
 
     local failsafe_active="false"
@@ -480,26 +636,62 @@ update_status() {
         local now_s lockout_s
         now_s=$(date +%s 2>/dev/null || echo 0)
         lockout_s=$(cat "${LOCKOUT_FILE}" 2>/dev/null || echo "0")
+        case "${lockout_s}" in ''|*[!0-9]*) lockout_s=0 ;; esac
         if [ "${now_s}" -lt "${lockout_s}" ]; then
             failsafe_active="true"
             failsafe_reason="lockout_active"
         fi
     fi
 
-    cat > "${STATUS_FILE}" << EOF
+    local mod_version=""
+    if [ -f "${TGDIR}/module.prop" ]; then
+        mod_version=$(sed -n 's/^version=//p' "${TGDIR}/module.prop" 2>/dev/null | head -1 | tr -d '\r')
+    fi
+    [ -n "${mod_version}" ] || mod_version="v1.0.2"
+
+    local ro_json="false"
+    [ "${TG_READ_ONLY}" = "true" ] && ro_json="true"
+    local ss_json="false"
+    [ "${TG_SAMSUNG_SAFE}" = "true" ] && ss_json="true"
+
+    local dev_n cpu_n gpu_n batt_n skin_n
+    dev_n=$(json_num "${dev_temp}")
+    cpu_n=$(json_num "${cpu_temp}")
+    gpu_n=$(json_num "${gpu_temp}")
+    batt_n=$(json_num "${batt_temp}")
+    skin_n=$(json_num "${skin_temp}")
+
+    local cpu_ok="false" gpu_ok="false" batt_ok="false" skin_ok="false"
+    [ "${cpu_n}" -gt 0 ] && cpu_ok="true"
+    [ "${gpu_n}" -gt 0 ] && gpu_ok="true"
+    [ "${batt_n}" -gt 0 ] && batt_ok="true"
+    [ "${skin_n}" -gt 0 ] && skin_ok="true"
+
+    local body
+    body=$(cat << EOF
 {
   "module": "thermalguard",
-  "version": "1.0.0",
+  "version": "${mod_version}",
   "soc": "${SOC_ID}",
-  "read_only": ${TG_READ_ONLY},
+  "soc_label": "${SOC_LABEL}",
+  "manufacturer": "${MFG}",
+  "samsung_safe": ${ss_json},
+  "read_only": ${ro_json},
   "zone": "${zone}",
   "profile": "${TG_PROFILE}",
+  "daemon_ok": true,
   "temps": {
-    "device_c": ${dev_temp:-0},
-    "cpu_c": ${cpu_temp:-0},
-    "gpu_c": ${gpu_temp:-0},
-    "battery_c": ${batt_temp:-0},
-    "skin_c": ${skin_temp:-0}
+    "device_c": ${dev_n},
+    "cpu_c": ${cpu_n},
+    "gpu_c": ${gpu_n},
+    "battery_c": ${batt_n},
+    "skin_c": ${skin_n}
+  },
+  "sensors": {
+    "cpu": { "ok": ${cpu_ok}, "temp_c": ${cpu_n}, "path": "${CPU_TEMP_PATH}", "type": "${CPU_TEMP_TYPE}" },
+    "gpu": { "ok": ${gpu_ok}, "temp_c": ${gpu_n}, "path": "${GPU_TEMP_PATH}", "type": "${GPU_TEMP_TYPE}" },
+    "battery": { "ok": ${batt_ok}, "temp_c": ${batt_n}, "path": "${BATT_NODE}", "type": "power_supply" },
+    "skin": { "ok": ${skin_ok}, "temp_c": ${skin_n}, "path": "${SKIN_TEMP_PATH}", "type": "${SKIN_TEMP_TYPE}" }
   },
   "thresholds": {
     "push_c": ${TG_PUSH_MAX},
@@ -518,6 +710,11 @@ update_status() {
   "last_update": ${now}
 }
 EOF
+)
+
+    # Atomic-ish write to both locations (WebUI bridge path compatibility)
+    echo "${body}" > "${STATUS_FILE}.tmp" 2>/dev/null && mv "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null
+    echo "${body}" > "/data/adb/modules/thermalguard/status.json" 2>/dev/null
 }
 
 # ─── Clear boot marker (successful boot) ───────────────────────────
@@ -538,12 +735,10 @@ main() {
     echo "normal" > "${CURRENT_ZONE_FILE}" 2>/dev/null
     echo "normal" > "${PREV_ZONE_FILE}" 2>/dev/null
 
-    local cpu_die_temp_path gpu_temp_path skin_temp_path
-    cpu_die_temp_path=$(find_thermal_zone "${SOC_CPU_TYPE_REGEX}")
-    gpu_temp_path=$(find_thermal_zone "${SOC_GPU_TYPE_REGEX}")
-    skin_temp_path=$(find_thermal_zone "skin|quiet|case|back")
+    resolve_sensors
+    dump_thermal_zones
 
-    log "Sensor paths: cpu=${cpu_die_temp_path:-none} gpu=${gpu_temp_path:-none} skin=${skin_temp_path:-none}"
+    log "Sensors: cpu=${CPU_TEMP_PATH:-none}(${CPU_TEMP_TYPE:-n/a}) gpu=${GPU_TEMP_PATH:-none}(${GPU_TEMP_TYPE:-n/a}) skin=${SKIN_TEMP_PATH:-none}(${SKIN_TEMP_TYPE:-n/a}) batt=${BATT_NODE}"
 
     while true; do
         # Check lockout (failsafe active)
@@ -579,11 +774,10 @@ main() {
         # ── Read temperatures ──
         local dev_temp="" cpu_temp="" gpu_temp="" batt_temp="" skin_temp=""
 
-        # Primary device temperature = CPU die (most responsive)
-        cpu_temp=$(read_temp_mc "${cpu_die_temp_path}" 2>/dev/null || echo "")
-        gpu_temp=$(read_temp_mc "${gpu_temp_path}" 2>/dev/null || echo "")
+        cpu_temp=$(read_temp_mc "${CPU_TEMP_PATH}" 2>/dev/null || echo "")
+        gpu_temp=$(read_temp_mc "${GPU_TEMP_PATH}" 2>/dev/null || echo "")
         batt_temp=$(read_battery_temp 2>/dev/null || echo "")
-        skin_temp=$(read_temp_mc "${skin_temp_path}" 2>/dev/null || echo "")
+        skin_temp=$(read_temp_mc "${SKIN_TEMP_PATH}" 2>/dev/null || echo "")
 
         # Device temp: prefer CPU die, fall back to skin, then battery
         if [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -gt 0 ]; then

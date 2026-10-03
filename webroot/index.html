@@ -62,18 +62,59 @@
                 <div class="sensor-card" id="sensor-cpu">
                     <span class="sensor-label">CPU</span>
                     <span class="sensor-value" id="cpu-temp">--°</span>
+                    <span class="sensor-meta" id="cpu-meta">not found</span>
                 </div>
                 <div class="sensor-card" id="sensor-gpu">
                     <span class="sensor-label">GPU</span>
                     <span class="sensor-value" id="gpu-temp">--°</span>
+                    <span class="sensor-meta" id="gpu-meta">not found</span>
                 </div>
                 <div class="sensor-card" id="sensor-batt">
                     <span class="sensor-label">Battery</span>
                     <span class="sensor-value" id="batt-temp">--°</span>
+                    <span class="sensor-meta" id="batt-meta">not found</span>
                 </div>
                 <div class="sensor-card" id="sensor-skin">
                     <span class="sensor-label">Skin</span>
                     <span class="sensor-value" id="skin-temp">--°</span>
+                    <span class="sensor-meta" id="skin-meta">not found</span>
+                </div>
+            </div>
+
+            <!-- Diagnostics -->
+            <div class="diag-container" id="diag-panel">
+                <div class="diag-header">
+                    <span class="diag-title">Diagnostics</span>
+                    <button class="btn-sm" onclick="refreshStatus()">Refresh</button>
+                </div>
+                <div class="diag-grid">
+                    <div class="diag-item">
+                        <span>SoC</span>
+                        <strong id="diag-soc">—</strong>
+                    </div>
+                    <div class="diag-item">
+                        <span>Manufacturer</span>
+                        <strong id="diag-mfg">—</strong>
+                    </div>
+                    <div class="diag-item">
+                        <span>Daemon</span>
+                        <strong id="diag-daemon">—</strong>
+                    </div>
+                    <div class="diag-item">
+                        <span>Last update</span>
+                        <strong id="diag-updated">—</strong>
+                    </div>
+                    <div class="diag-item">
+                        <span>Mode</span>
+                        <strong id="diag-mode">—</strong>
+                    </div>
+                    <div class="diag-item">
+                        <span>Version</span>
+                        <strong id="diag-version">—</strong>
+                    </div>
+                </div>
+                <div class="diag-sensors" id="diag-sensors">
+                    <div class="diag-empty">Waiting for daemon status…</div>
                 </div>
             </div>
 
