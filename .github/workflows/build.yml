@@ -89,32 +89,37 @@ jobs:
         run: |
           set -euo pipefail
           ZIP_NAME="${{ steps.zip.outputs.zip_name }}"
-          LIST=$(unzip -l "$ZIP_NAME" | awk '{print $NF}')
+
+          # unzip -Z1 = filenames only (no "Archive: ...zip" header — avoids false positive)
+          LIST=$(unzip -Z1 "$ZIP_NAME" | sed 's|^\./||')
 
           # 1) module.prop must exist at zip root
-          if ! echo "$LIST" | grep -qx 'module.prop'; then
+          if ! printf '%s\n' "$LIST" | grep -qx 'module.prop'; then
             echo "::error::module.prop is not at the zip root"
+            printf '%s\n' "$LIST"
             exit 1
           fi
 
           # 2) No nested .zip inside the package
-          if echo "$LIST" | grep -Eiq '\.zip$'; then
+          NESTED=$(printf '%s\n' "$LIST" | grep -Ei '\.zip$' || true)
+          if [ -n "$NESTED" ]; then
             echo "::error::Found a .zip inside the release zip (nested archive)"
-            echo "$LIST" | grep -Ei '\.zip$' || true
+            printf '%s\n' "$NESTED"
             exit 1
           fi
 
           # 3) Required Magisk/KernelSU entry points present
           for f in customize.sh service.sh post-fs-data.sh; do
-            if ! echo "$LIST" | grep -qx "$f"; then
+            if ! printf '%s\n' "$LIST" | grep -qx "$f"; then
               echo "::error::Missing required file at zip root: $f"
+              printf '%s\n' "$LIST"
               exit 1
             fi
           done
 
           # 4) No repo-only junk
           for bad in .git .github docs CONTRIBUTING.md SECURITY.md; do
-            if echo "$LIST" | grep -q "^${bad}/\|^${bad}$"; then
+            if printf '%s\n' "$LIST" | grep -q "^${bad}/\|^${bad}$"; then
               echo "::error::Repo-only path leaked into module zip: $bad"
               exit 1
             fi

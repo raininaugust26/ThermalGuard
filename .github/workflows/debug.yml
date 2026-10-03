@@ -98,21 +98,27 @@ jobs:
         run: |
           set -euo pipefail
           ZIP_NAME="${{ steps.ver.outputs.zip_name }}"
-          LIST=$(unzip -l "$ZIP_NAME" | awk '{print $NF}')
 
-          if ! echo "$LIST" | grep -qx 'module.prop'; then
+          # unzip -Z1 = filenames only (no "Archive: ...zip" header — avoids false positive)
+          LIST=$(unzip -Z1 "$ZIP_NAME" | sed 's|^\./||')
+
+          if ! printf '%s\n' "$LIST" | grep -qx 'module.prop'; then
             echo "::error::module.prop is not at the zip root"
+            printf '%s\n' "$LIST"
             exit 1
           fi
 
-          if echo "$LIST" | grep -Eiq '\.zip$'; then
+          NESTED=$(printf '%s\n' "$LIST" | grep -Ei '\.zip$' || true)
+          if [ -n "$NESTED" ]; then
             echo "::error::Found a .zip inside the beta zip (nested archive)"
+            printf '%s\n' "$NESTED"
             exit 1
           fi
 
           for f in customize.sh service.sh post-fs-data.sh; do
-            if ! echo "$LIST" | grep -qx "$f"; then
+            if ! printf '%s\n' "$LIST" | grep -qx "$f"; then
               echo "::error::Missing required file at zip root: $f"
+              printf '%s\n' "$LIST"
               exit 1
             fi
           done
