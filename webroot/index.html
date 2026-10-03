@@ -31,7 +31,11 @@
                     <h1 class="app-title">ThermalGuard</h1>
                     <span id="status-pill" class="pill pill-active">Active</span>
                 </div>
-                <div id="soc-badge" class="soc-badge">SoC</div>
+                <div class="header-actions">
+                    <div id="soc-badge" class="soc-badge">SoC</div>
+                    <button class="btn-sm" onclick="shareLogs()">Logs</button>
+                    <button class="btn-sm" onclick="refreshStatus()">Refresh</button>
+                </div>
             </header>
 
             <!-- Read-only warning -->

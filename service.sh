@@ -3,6 +3,9 @@
 # Main daemon: temperature monitor → zone engine → apply actions.
 # Runs as a late_start service via Magisk/KernelSU/APatch.
 
+# Never abort the daemon on a single command failure (Magisk may use -e)
+set +e
+
 TGDIR="/data/adb/thermalguard"
 TG_BIN="${TGDIR}/bin"
 TG_STATE="${TGDIR}/state"
@@ -758,60 +761,75 @@ main() {
     log "Regex cpu='${SOC_CPU_TYPE_REGEX}' gpu='${SOC_GPU_TYPE_REGEX}' skin='${SOC_SKIN_TYPE_REGEX}'"
     log "Zone ref: battery preferred (PRD device temp); CPU/GPU die only for 85C abs limit"
 
-    # Seed status immediately so WebUI is never stuck on install-time zeros
-    update_status "normal" "0" "0" "0" "0" "0"
+    # Best-effort seed with REAL temps (not zeros) so WebUI has data immediately
+    _c=$(read_temp_mc "${CPU_TEMP_PATH}" 2>/dev/null || echo "")
+    _g=$(read_temp_mc "${GPU_TEMP_PATH}" 2>/dev/null || echo "")
+    _b=$(read_battery_temp 2>/dev/null || echo "")
+    _s=$(read_temp_mc "${SKIN_TEMP_PATH}" 2>/dev/null || echo "")
+    log "Initial read cpu=${_c:-na} gpu=${_g:-na} batt=${_b:-na} skin=${_s:-na}"
+    _z="normal"
+    if [ -n "${_b}" ] && [ "${_b}" -ge 45 ]; then _z="critical"
+    elif [ -n "${_b}" ] && [ "${_b}" -ge 42 ]; then _z="limit"
+    elif [ -n "${_b}" ] && [ "${_b}" -ge 38 ]; then _z="push"
+    fi
+    [ -n "${_b}" ] && zone_ref_src="battery"
+    [ -z "${_b}" ] && [ -n "${_s}" ] && zone_ref_src="skin"
+    [ -z "${_b}" ] && [ -z "${_s}" ] && zone_ref_src="none"
+    update_status "${_z}" "${_b:-0}" "${_c:-0}" "${_g:-0}" "${_b:-0}" "${_s:-0}"
 
+    _loop=0
     while true; do
+        _loop=$(( _loop + 1 ))
+
         # Check lockout (failsafe active)
         if [ -f "${LOCKOUT_FILE}" ]; then
-            local now_s lockout_s
             now_s=$(date +%s 2>/dev/null || echo 0)
             lockout_s=$(cat "${LOCKOUT_FILE}" 2>/dev/null || echo "0")
+            case "${lockout_s}" in ''|*[!0-9]*) lockout_s=0 ;; esac
             if [ "${now_s}" -lt "${lockout_s}" ]; then
-                update_status "critical" "0" "0" "0" "0" "0"
+                _c=$(read_temp_mc "${CPU_TEMP_PATH}" 2>/dev/null || echo "")
+                _g=$(read_temp_mc "${GPU_TEMP_PATH}" 2>/dev/null || echo "")
+                _b=$(read_battery_temp 2>/dev/null || echo "")
+                _s=$(read_temp_mc "${SKIN_TEMP_PATH}" 2>/dev/null || echo "")
+                update_status "critical" "${_b:-0}" "${_c:-0}" "${_g:-0}" "${_b:-0}" "${_s:-0}"
                 sleep "${TG_POLL_INTERVAL}"
                 continue
             else
-                # Lockout expired — clean state
                 rm -f "${LOCKOUT_FILE}" 2>/dev/null
                 log "Lockout expired — resuming normal operation"
-                # Re-initialize zone to normal
                 echo "normal" > "${CURRENT_ZONE_FILE}" 2>/dev/null
                 echo "normal" > "${PREV_ZONE_FILE}" 2>/dev/null
             fi
         fi
 
-        # Check profile change request
+        # Profile change request (optional)
         if [ -f "${TG_STATE}/profile_request" ]; then
-            local requested
             requested=$(cat "${TG_STATE}/profile_request" 2>/dev/null || echo "")
-            if [ -n "${requested}" ] && [ "${requested}" != "${TG_PROFILE}" ]; then
-                load_profile "${requested}"
-                log "Profile switched to: ${TG_PROFILE}"
-            fi
+            case "${requested}" in
+                auto|gaming|saver)
+                    if [ "${requested}" != "${TG_PROFILE}" ]; then
+                        load_profile "${requested}"
+                        log "Profile switched to: ${TG_PROFILE}"
+                    fi
+                    ;;
+            esac
             rm -f "${TG_STATE}/profile_request" 2>/dev/null
         fi
 
         # ── Read temperatures ──
-        local dev_temp="" cpu_temp="" gpu_temp="" batt_temp="" skin_temp=""
-        zone_ref_src=""
-
         cpu_temp=$(read_temp_mc "${CPU_TEMP_PATH}" 2>/dev/null || echo "")
         gpu_temp=$(read_temp_mc "${GPU_TEMP_PATH}" 2>/dev/null || echo "")
         batt_temp=$(read_battery_temp 2>/dev/null || echo "")
         skin_temp=$(read_temp_mc "${SKIN_TEMP_PATH}" 2>/dev/null || echo "")
 
         # PRD: zone thresholds use DEVICE temp (battery/skin), NOT CPU die.
-        # CPU/GPU die only feed absolute limits (85°C).
-        # Samsung quiet-therm often reads ~10°C hotter than battery → false Critical.
-        if [ -n "${batt_temp}" ] && [ "${batt_temp}" -gt 0 ]; then
+        if [ -n "${batt_temp}" ] && [ "${batt_temp}" -gt 0 ] 2>/dev/null; then
             dev_temp="${batt_temp}"
             zone_ref_src="battery"
-        elif [ -n "${skin_temp}" ] && [ "${skin_temp}" -gt 0 ]; then
+        elif [ -n "${skin_temp}" ] && [ "${skin_temp}" -gt 0 ] 2>/dev/null; then
             dev_temp="${skin_temp}"
             zone_ref_src="skin"
-        elif [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -gt 0 ]; then
-            # Last resort only — die temp is not a device-temp proxy
+        elif [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -gt 0 ] 2>/dev/null; then
             dev_temp="${cpu_temp}"
             zone_ref_src="cpu_fallback"
         else
@@ -819,62 +837,50 @@ main() {
             zone_ref_src="none"
         fi
 
-        # ── Resolve zone ──
-        local new_zone
+        # ── Resolve zone (inline POSIX — do NOT source zone_engine here) ──
+        new_zone="normal"
         if [ -z "${dev_temp}" ]; then
             new_zone="critical"
-            log "No valid temperature sensor — forcing critical zone"
         else
-            # POSIX zone engine (mksh-safe). Source once; fall back if it fails.
-            if ! command -v zone_engine_resolve >/dev/null 2>&1; then
-                . "${TG_BIN}/zone_engine.sh" 2>/dev/null
-            fi
-            if command -v zone_engine_resolve >/dev/null 2>&1; then
-                # abs limits: cpu die, battery; zone thresholds: device ref (battery/skin)
-                new_zone=$(zone_engine_resolve "${dev_temp}" "${cpu_temp:-0}" "${batt_temp:-0}" "${gpu_temp:-0}")
+            if [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -ge 85 ] 2>/dev/null; then
+                new_zone="critical"
+            elif [ -n "${gpu_temp}" ] && [ "${gpu_temp}" -ge 85 ] 2>/dev/null; then
+                new_zone="critical"
+            elif [ -n "${batt_temp}" ] && [ "${batt_temp}" -ge 48 ] 2>/dev/null; then
+                new_zone="critical"
+            elif [ "${dev_temp}" -ge "${TG_CRITICAL_MAX}" ] 2>/dev/null; then
+                new_zone="critical"
+            elif [ "${dev_temp}" -ge "${TG_LIMIT_MAX}" ] 2>/dev/null; then
+                new_zone="limit"
+            elif [ "${dev_temp}" -ge "${TG_PUSH_MAX}" ] 2>/dev/null; then
+                new_zone="push"
             else
-                # Inline fallback thresholds (no hysteresis)
-                if [ -n "${cpu_temp}" ] && [ "${cpu_temp}" -ge 85 ]; then
-                    new_zone="critical"
-                elif [ -n "${batt_temp}" ] && [ "${batt_temp}" -ge 48 ]; then
-                    new_zone="critical"
-                elif [ "${dev_temp}" -ge "${TG_CRITICAL_MAX}" ]; then
-                    new_zone="critical"
-                elif [ "${dev_temp}" -ge "${TG_LIMIT_MAX}" ]; then
-                    new_zone="limit"
-                elif [ "${dev_temp}" -ge "${TG_PUSH_MAX}" ]; then
-                    new_zone="push"
-                else
-                    new_zone="normal"
-                fi
+                new_zone="normal"
             fi
-            [ -n "${new_zone}" ] || new_zone="normal"
+            # Hysteresis: stay in hotter zone until temp drops below threshold - hyst
+            prev_zone=$(cat "${CURRENT_ZONE_FILE}" 2>/dev/null || echo "normal")
+            if [ "${prev_zone}" = "critical" ] && [ "${dev_temp}" -ge $(( TG_CRITICAL_MAX - TG_HYSTERESIS )) ] 2>/dev/null; then
+                new_zone="critical"
+            elif [ "${prev_zone}" = "limit" ] && [ "${dev_temp}" -ge $(( TG_LIMIT_MAX - TG_HYSTERESIS )) ] 2>/dev/null; then
+                new_zone="limit"
+            elif [ "${prev_zone}" = "push" ] && [ "${dev_temp}" -ge $(( TG_PUSH_MAX - TG_HYSTERESIS )) ] 2>/dev/null; then
+                new_zone="push"
+            fi
         fi
+        [ -n "${new_zone}" ] || new_zone="normal"
 
-        # Track zone transition
-        local prev_zone
         prev_zone=$(cat "${CURRENT_ZONE_FILE}" 2>/dev/null || echo "normal")
-
         if [ "${new_zone}" != "${prev_zone}" ]; then
-            if command -v zone_engine_log >/dev/null 2>&1; then
-                zone_engine_log "${prev_zone}" "${new_zone}" "${dev_temp:-0}" "temp_threshold"
-            else
-                echo "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) ${prev_zone} -> ${new_zone} temp=${dev_temp:-0}C" >> "${HISTORY_FILE}"
-            fi
-            log "Zone transition: ${prev_zone} -> ${new_zone} (temp=${dev_temp:-N/A}C)"
+            echo "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) ${prev_zone} -> ${new_zone} temp=${dev_temp:-0}C ref=${zone_ref_src}" >> "${HISTORY_FILE}" 2>/dev/null
+            log "Zone transition: ${prev_zone} -> ${new_zone} (dev=${dev_temp:-N/A}C ref=${zone_ref_src} cpu=${cpu_temp:-na} batt=${batt_temp:-na})"
             echo "${new_zone}" > "${CURRENT_ZONE_FILE}" 2>/dev/null
             echo "${prev_zone}" > "${PREV_ZONE_FILE}" 2>/dev/null
-
-            # Apply actions on transition
             apply_zone_actions "${new_zone}"
         fi
 
         # ── Update status ──
-        if ! update_status "${new_zone}" "${dev_temp:-0}" "${cpu_temp:-0}" "${gpu_temp:-0}" "${batt_temp:-0}" "${skin_temp:-0}"; then
-            log "update_status returned error (zone=${new_zone})"
-        fi
+        update_status "${new_zone}" "${dev_temp:-0}" "${cpu_temp:-0}" "${gpu_temp:-0}" "${batt_temp:-0}" "${skin_temp:-0}"
 
-        # Health check: daemon produced status → clear boot marker (anti-bootloop)
         if [ "${TG_FIRST_HEALTHY}" != "1" ] && [ -f "${STATUS_FILE}" ]; then
             clear_boot_marker
             echo "0" > "${TG_STATE}/boot_count" 2>/dev/null
@@ -882,7 +888,10 @@ main() {
             log "Boot health check passed — boot marker cleared"
         fi
 
-        # ── Sleep ──
+        if [ "${_loop}" -le 8 ] || [ $(( _loop % 30 )) -eq 0 ]; then
+            log "Loop#${_loop} zone=${new_zone} ref=${zone_ref_src} cpu=${cpu_temp:-na} gpu=${gpu_temp:-na} batt=${batt_temp:-na} skin=${skin_temp:-na} dev=${dev_temp:-na}"
+        fi
+
         sleep "${TG_POLL_INTERVAL}"
     done
 }

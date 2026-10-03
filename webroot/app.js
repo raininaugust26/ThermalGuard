@@ -34,41 +34,90 @@
     let lastStatusSource = '';
 
     // ── WebUI bridge ──
-    function normalizeExecResult(res) {
-        if (res == null) return '';
-        if (typeof res === 'string') return res;
-        if (typeof res === 'object') {
-            return res.stdout || res.output || res.data || res.result || '';
+    // KernelSU exec callback is often (code, stdout, stderr) — NOT (result).
+    // Some builds use Promise. Always timeout so UI never hangs on "Waiting…".
+
+    function normalizeExecResult(a, b, c) {
+        if (typeof b === 'string') return b;           // (code, stdout, stderr)
+        if (typeof a === 'string' && a.length > 0 && a !== '0' && isNaN(Number(a))) return a;
+        if (a && typeof a === 'object') {
+            return a.stdout || a.output || a.data || a.result || '';
         }
-        return String(res);
+        if (typeof c === 'string') return c;
+        return '';
     }
 
-    function ksExec(cmd) {
+    function withTimeout(promise, ms, fallback) {
         return new Promise((resolve) => {
-            if (typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function') {
-                window.ksu.exec(cmd, (res) => resolve(normalizeExecResult(res)));
-            } else if (typeof window.ap !== 'undefined' && typeof window.ap.exec === 'function') {
-                window.ap.exec(cmd, (res) => resolve(normalizeExecResult(res)));
-            } else {
-                resolve('');
-            }
+            let done = false;
+            const finish = (v) => {
+                if (done) return;
+                done = true;
+                resolve(v);
+            };
+            setTimeout(() => finish(fallback), ms);
+            Promise.resolve(promise).then(finish).catch(() => finish(fallback));
         });
     }
 
-    function ksReadFile(path) {
-        return new Promise((resolve) => {
+    function ksExec(cmd) {
+        return withTimeout(new Promise((resolve) => {
             try {
-                if (typeof window.ksu !== 'undefined' && typeof window.ksu.readFile === 'function') {
-                    window.ksu.readFile(path, (res) => resolve(res == null ? '' : String(res)));
-                } else if (typeof window.ap !== 'undefined' && typeof window.ap.readFile === 'function') {
-                    window.ap.readFile(path, (res) => resolve(res == null ? '' : String(res)));
+                if (window.ksu && typeof window.ksu.exec === 'function') {
+                    const ret = window.ksu.exec(cmd, function (a, b, c) {
+                        resolve(normalizeExecResult(a, b, c));
+                    });
+                    if (ret && typeof ret.then === 'function') {
+                        ret.then((r) => {
+                            if (typeof r === 'string') resolve(r);
+                            else if (r && typeof r === 'object') resolve(normalizeExecResult(r));
+                            else resolve('');
+                        }).catch(() => resolve(''));
+                    }
+                } else if (window.ap && typeof window.ap.exec === 'function') {
+                    const ret = window.ap.exec(cmd, function (a, b, c) {
+                        resolve(normalizeExecResult(a, b, c));
+                    });
+                    if (ret && typeof ret.then === 'function') {
+                        ret.then((r) => {
+                            if (typeof r === 'string') resolve(r);
+                            else if (r && typeof r === 'object') resolve(normalizeExecResult(r));
+                            else resolve('');
+                        }).catch(() => resolve(''));
+                    }
                 } else {
                     resolve('');
                 }
             } catch (e) {
                 resolve('');
             }
-        });
+        }), 2500, '');
+    }
+
+    function ksReadFile(path) {
+        return withTimeout(new Promise((resolve) => {
+            try {
+                if (window.ksu && typeof window.ksu.readFile === 'function') {
+                    const ret = window.ksu.readFile(path, function (res) {
+                        resolve(res == null ? '' : String(res));
+                    });
+                    if (ret && typeof ret.then === 'function') {
+                        ret.then((r) => resolve(r == null ? '' : String(r))).catch(() => resolve(''));
+                    }
+                } else if (window.ap && typeof window.ap.readFile === 'function') {
+                    const ret = window.ap.readFile(path, function (res) {
+                        resolve(res == null ? '' : String(res));
+                    });
+                    if (ret && typeof ret.then === 'function') {
+                        ret.then((r) => resolve(r == null ? '' : String(r))).catch(() => resolve(''));
+                    }
+                } else {
+                    resolve('');
+                }
+            } catch (e) {
+                resolve('');
+            }
+        }), 2000, '');
     }
 
     function looksLikeStatus(text) {
@@ -659,20 +708,23 @@
 
     // ── Init ──
     function init() {
-        // Initial poll
+        // Immediate poll + periodic
         pollStatus();
         loadProfileEditor();
-
-        // Poll every 2 seconds (match daemon interval)
         pollTimer = setInterval(pollStatus, 2000);
 
-        // Keyboard accessibility: Enter/Space on profile buttons already handled by browser
-        // Ensure gauge accessible label
         const gauge = document.getElementById('gauge-ring');
         if (gauge) {
             gauge.setAttribute('role', 'img');
             gauge.setAttribute('aria-label', 'Temperature gauge');
         }
+
+        // If still empty after 6s, show explicit error (not silent "Waiting…")
+        setTimeout(() => {
+            if (!statusData) {
+                renderStatusError('No data after 6s. Check module v1.0.5+ and WebUI bridge (KernelSU/APatch).');
+            }
+        }, 6000);
     }
 
     // Wait for DOM
