@@ -90,6 +90,32 @@ load_profile() {
     ABS_BATT_C=48
 }
 
+# apply_profile_env — read KEY=VALUE written by WebUI saveProfile (no jq needed)
+apply_profile_env() {
+    local envf="${TG_CONFIG}/profile_active.env"
+    [ -f "${envf}" ] || return 0
+    local line key val
+    while IFS= read -r line || [ -n "${line}" ]; do
+        case "${line}" in
+            ''|\#*) continue ;;
+        esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        case "${key}" in
+            PROFILE)
+                case "${val}" in auto|gaming|saver) TG_PROFILE="${val}" ;; esac
+                ;;
+            PUSH)   case "${val}" in ''|*[!0-9]*) ;; *) TG_PUSH_MAX="${val}" ;; esac ;;
+            LIMIT)  case "${val}" in ''|*[!0-9]*) ;; *) TG_LIMIT_MAX="${val}" ;; esac ;;
+            STEP)   case "${val}" in ''|*[!0-9]*) ;; *) TG_STEP_DOWN_PCT="${val}" ;; esac ;;
+            CHARGING_MA)
+                case "${val}" in ''|*[!0-9]*) ;; *) TG_CHARGING_MA_LIMIT="${val}" ;; esac
+                ;;
+        esac
+    done < "${envf}"
+    log "Profile env applied: profile=${TG_PROFILE} push=${TG_PUSH_MAX} limit=${TG_LIMIT_MAX} step=${TG_STEP_DOWN_PCT}"
+}
+
 # ─── Logging helper ────────────────────────────────────────────────
 log() {
     local ts
@@ -830,12 +856,15 @@ main() {
                 auto|gaming|saver)
                     if [ "${requested}" != "${TG_PROFILE}" ]; then
                         load_profile "${requested}"
+                        apply_profile_env
                         log "Profile switched to: ${TG_PROFILE}"
                     fi
                     ;;
             esac
             rm -f "${TG_STATE}/profile_request" 2>/dev/null
         fi
+        # Always re-apply env overrides (sliders may change without profile name change)
+        apply_profile_env
 
         # ── Read temperatures ──
         cpu_temp=$(read_temp_mc "${CPU_TEMP_PATH}" 2>/dev/null || echo "")

@@ -324,7 +324,7 @@ echo "0" > "${TG_STATE}/boot_count" 2>/dev/null
 cat > "${TGDIR}/status.json" << EOF
 {
   "module": "thermalguard",
-  "version": "v1.0.6",
+  "version": "v1.0.7",
   "soc": "${SOC_ID}",
   "soc_label": "${SOC_LABEL:-Unknown}",
   "manufacturer": "${MFG:-unknown}",

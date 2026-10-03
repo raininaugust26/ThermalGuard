@@ -11,6 +11,7 @@
     const WEB_STATUS = 'status.json'; // relative to webroot (KSU sandbox-friendly)
     const STATE_DIR = '/data/adb/thermalguard/state';
     const PROFILE_REQUEST = `${STATE_DIR}/profile_request`;
+    const PROFILE_ENV = '/data/adb/thermalguard/config/profile_active.env';
     const HISTORY_FILE = `${STATE_DIR}/history.log`;
     const SENSORS_LOG = '/data/adb/thermalguard/logs/sensors.txt';
     const DAEMON_LOG = '/data/adb/thermalguard/logs/daemon.log';
@@ -34,90 +35,38 @@
     let lastStatusSource = '';
 
     // ── WebUI bridge ──
-    // KernelSU exec callback is often (code, stdout, stderr) — NOT (result).
-    // Some builds use Promise. Always timeout so UI never hangs on "Waiting…".
+    // KernelSU/ResukiSU: ksu.exec(cmd, optionsJson, callbackFuncName)
+    // callbackFuncName HARUS berupa NAMA fungsi global (string), bukan function object.
+    // Callback dipanggil sebagai (errno, stdout, stderr).
+    let cbCounter = 0;
 
-    function normalizeExecResult(a, b, c) {
-        if (typeof b === 'string') return b;           // (code, stdout, stderr)
-        if (typeof a === 'string' && a.length > 0 && a !== '0' && isNaN(Number(a))) return a;
-        if (a && typeof a === 'object') {
-            return a.stdout || a.output || a.data || a.result || '';
-        }
-        if (typeof c === 'string') return c;
-        return '';
-    }
-
-    function withTimeout(promise, ms, fallback) {
+    function ksExec(cmd, timeoutMs) {
         return new Promise((resolve) => {
-            let done = false;
-            const finish = (v) => {
-                if (done) return;
-                done = true;
-                resolve(v);
+            const api = (window.ksu && typeof window.ksu.exec === 'function') ? window.ksu
+                      : (window.ap && typeof window.ap.exec === 'function') ? window.ap
+                      : null;
+            if (!api) { resolve(''); return; }
+
+            const cb = `tg_exec_cb_${Date.now()}_${cbCounter++}`;
+            const timer = setTimeout(() => {
+                delete window[cb];
+                resolve('');
+            }, timeoutMs || 3000);
+
+            window[cb] = function (errno, stdout, stderr) {
+                clearTimeout(timer);
+                delete window[cb];
+                resolve(typeof stdout === 'string' ? stdout : '');
             };
-            setTimeout(() => finish(fallback), ms);
-            Promise.resolve(promise).then(finish).catch(() => finish(fallback));
+
+            try {
+                api.exec(cmd, '{}', cb);
+            } catch (e) {
+                clearTimeout(timer);
+                delete window[cb];
+                resolve('');
+            }
         });
-    }
-
-    function ksExec(cmd) {
-        return withTimeout(new Promise((resolve) => {
-            try {
-                if (window.ksu && typeof window.ksu.exec === 'function') {
-                    const ret = window.ksu.exec(cmd, function (a, b, c) {
-                        resolve(normalizeExecResult(a, b, c));
-                    });
-                    if (ret && typeof ret.then === 'function') {
-                        ret.then((r) => {
-                            if (typeof r === 'string') resolve(r);
-                            else if (r && typeof r === 'object') resolve(normalizeExecResult(r));
-                            else resolve('');
-                        }).catch(() => resolve(''));
-                    }
-                } else if (window.ap && typeof window.ap.exec === 'function') {
-                    const ret = window.ap.exec(cmd, function (a, b, c) {
-                        resolve(normalizeExecResult(a, b, c));
-                    });
-                    if (ret && typeof ret.then === 'function') {
-                        ret.then((r) => {
-                            if (typeof r === 'string') resolve(r);
-                            else if (r && typeof r === 'object') resolve(normalizeExecResult(r));
-                            else resolve('');
-                        }).catch(() => resolve(''));
-                    }
-                } else {
-                    resolve('');
-                }
-            } catch (e) {
-                resolve('');
-            }
-        }), 2500, '');
-    }
-
-    function ksReadFile(path) {
-        return withTimeout(new Promise((resolve) => {
-            try {
-                if (window.ksu && typeof window.ksu.readFile === 'function') {
-                    const ret = window.ksu.readFile(path, function (res) {
-                        resolve(res == null ? '' : String(res));
-                    });
-                    if (ret && typeof ret.then === 'function') {
-                        ret.then((r) => resolve(r == null ? '' : String(r))).catch(() => resolve(''));
-                    }
-                } else if (window.ap && typeof window.ap.readFile === 'function') {
-                    const ret = window.ap.readFile(path, function (res) {
-                        resolve(res == null ? '' : String(res));
-                    });
-                    if (ret && typeof ret.then === 'function') {
-                        ret.then((r) => resolve(r == null ? '' : String(r))).catch(() => resolve(''));
-                    }
-                } else {
-                    resolve('');
-                }
-            } catch (e) {
-                resolve('');
-            }
-        }), 2000, '');
     }
 
     function looksLikeStatus(text) {
@@ -126,58 +75,52 @@
         return t.length > 20 && t.indexOf('"module"') !== -1 && t.indexOf('{') === 0;
     }
 
-    /**
-     * Read a file with multiple strategies:
-     * 1) webroot-relative (KernelSU sandbox)
-     * 2) root `cat` via ksu.exec / ap.exec  ← main path for /data/adb/*
-     * 3) readFile absolute (some managers allow it)
-     */
     async function readSmart(path) {
-        // Prefer webroot copy for status.json
         if (path === DATA_STATUS || path === MOD_STATUS) {
-            const rel = await ksReadFile(WEB_STATUS);
-            if (looksLikeStatus(rel)) {
-                lastStatusSource = 'webroot';
-                return rel;
-            }
-            const viaExec = await ksExec(`cat "${path}" 2>/dev/null`);
-            if (looksLikeStatus(viaExec)) {
-                lastStatusSource = 'exec:' + path;
-                return viaExec;
-            }
-            const abs = await ksReadFile(path);
-            if (looksLikeStatus(abs)) {
-                lastStatusSource = 'readFile:' + path;
-                return abs;
-            }
-            return '';
+            return (await readStatusRaw()) || '';
         }
-
-        const viaExec = await ksExec(`cat "${path}" 2>/dev/null`);
-        if (viaExec && String(viaExec).trim().length > 0) return viaExec;
-        const abs = await ksReadFile(path);
-        return abs || '';
+        return await ksExec(`cat "${path}" 2>/dev/null`);
     }
 
     async function readStatusRaw() {
-        for (const path of [DATA_STATUS, MOD_STATUS]) {
-            const raw = await readSmart(path);
-            if (looksLikeStatus(raw)) return raw;
-        }
-        // Last resort: any JSON-ish body from exec
-        const any = await ksExec(`cat "${DATA_STATUS}" "${MOD_STATUS}" 2>/dev/null`);
-        if (looksLikeStatus(any)) {
-            lastStatusSource = 'exec:concat';
-            return any;
+        // 1) fetch relatif ke webroot (salinan ditulis daemon ke webroot/status.json)
+        try {
+            const r = await fetch('status.json?t=' + Date.now(), { cache: 'no-store' });
+            if (r.ok) {
+                const t = await r.text();
+                if (looksLikeStatus(t)) {
+                    lastStatusSource = 'webroot (fetch)';
+                    return t;
+                }
+            }
+        } catch (e) { /* lanjut ke exec */ }
+
+        // 2) root cat via ksu.exec
+        for (const p of [DATA_STATUS, MOD_STATUS]) {
+            const t = await ksExec(`cat "${p}" 2>/dev/null`);
+            if (looksLikeStatus(t)) {
+                lastStatusSource = 'exec:' + p;
+                return t;
+            }
         }
         return null;
     }
 
+    let polling = false;
+
+    function bridgeInfo() {
+        const ksuOk = !!(window.ksu && typeof window.ksu.exec === 'function');
+        const apOk = !!(window.ap && typeof window.ap.exec === 'function');
+        return `bridge: ksu.exec=${ksuOk ? 'ada' : 'tidak ada'}, ap.exec=${apOk ? 'ada' : 'tidak ada'}`;
+    }
+
     async function pollStatus() {
+        if (polling) return; // cegah polling tumpang-tindih
+        polling = true;
         try {
             const raw = await readStatusRaw();
             if (!raw) {
-                renderStatusError('No status.json. Install v1.0.4+, reboot, open WebUI again.');
+                renderStatusError('status.json tidak terbaca (' + bridgeInfo() + '). Cek daemon: /data/adb/thermalguard/logs/daemon.log');
                 return;
             }
             const data = JSON.parse(raw);
@@ -185,6 +128,8 @@
             renderStatus(data);
         } catch (e) {
             renderStatusError('Invalid status.json: ' + (e && e.message ? e.message : e));
+        } finally {
+            polling = false;
         }
     }
 
@@ -217,11 +162,6 @@
         if (gz) gz.textContent = 'No data';
     }
 
-    function ksWriteFile(path, content) {
-        // Prefer root echo via exec (KSU writeFile may be sandboxed)
-        return ksExec(`printf '%s' '${String(content).replace(/'/g, "'\\''")}' > "${path}"`);
-    }
-
     // ── Navigation ──
     window.navigateTo = function (screen) {
         document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -237,7 +177,6 @@
     };
 
     function renderStatus(data) {
-        // SoC badge
         const socBadge = document.getElementById('soc-badge');
         if (socBadge) {
             const label = data.soc_label || data.soc || 'UNKNOWN';
@@ -245,7 +184,6 @@
             socBadge.title = `id=${data.soc || '?'} mfg=${data.manufacturer || '?'}`;
         }
 
-        // Read-only / Samsung-safe
         readOnlyMode = !!data.read_only;
         const roBanner = document.getElementById('readonly-banner');
         const roStatus = document.getElementById('sec-readonly-status');
@@ -260,7 +198,6 @@
             else modeEl.textContent = 'Full';
         }
 
-        // Failsafe banner
         const critBanner = document.getElementById('critical-banner');
         const bannerMsg = document.getElementById('banner-msg');
         if (critBanner) {
@@ -274,7 +211,6 @@
             }
         }
 
-        // Zone
         const zone = data.zone || 'normal';
         prevZone = currentZone;
         currentZone = zone;
@@ -314,7 +250,6 @@
             ring.classList.add('pulse');
         }
 
-        // Sensors + meta
         const temps = data.temps || {};
         const sensors = data.sensors || {};
         renderSensor('cpu', 'cpu-temp', 'cpu-meta', temps.cpu_c, sensors.cpu, zone);
@@ -322,7 +257,6 @@
         renderSensor('batt', 'batt-temp', 'batt-meta', temps.battery_c, sensors.battery, 'normal');
         renderSensor('skin', 'skin-temp', 'skin-meta', temps.skin_c, sensors.skin, zone);
 
-        // Diagnostics
         renderDiagnostics(data);
 
         if (data.profile) activeProfile = data.profile;
@@ -431,18 +365,6 @@
         list.innerHTML = html;
     }
 
-    function setSensorValue(valueId, cardId, value, zone) {
-        // kept for compatibility; renderSensor is used
-        const el = document.getElementById(valueId);
-        if (el) {
-            if (value !== undefined && value !== null && value > 0) {
-                el.textContent = `${value}°`;
-            } else {
-                el.textContent = 'N/A';
-            }
-        }
-    }
-
     function updateProfileButtons(profile) {
         document.querySelectorAll('.profile-btn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.profile === profile);
@@ -454,9 +376,10 @@
         activeProfile = profile;
         updateProfileButtons(profile);
 
-        // Write profile request via root shell
         await ksExec(`echo '${profile}' > "${PROFILE_REQUEST}" 2>/dev/null`);
         await ksExec(`echo '${profile}' > "/data/adb/modules/thermalguard/state/profile_request" 2>/dev/null`);
+        // Also refresh env so daemon can re-apply overlays
+        await ksExec(`sed -i 's/^PROFILE=.*/PROFILE=${profile}/' "${PROFILE_ENV}" 2>/dev/null || true`);
 
         showToast('Profile saved');
     };
@@ -492,8 +415,11 @@
     };
 
     window.saveProfile = async function () {
-        // Read values from the active panel
         const config = {};
+        let envPush = '';
+        let envLimit = '';
+        let envStep = '';
+        let envChg = '';
 
         if (editingTab === 'gaming') {
             config.gaming = {
@@ -504,30 +430,50 @@
                 bg: document.getElementById('gaming-bg')?.checked,
                 auto: document.getElementById('gaming-auto')?.checked
             };
+            envPush = config.gaming.push;
+            envLimit = config.gaming.limit;
+            envStep = config.gaming.step;
+            envChg = config.gaming.charging;
         } else if (editingTab === 'auto') {
             config.auto = {
                 push: document.getElementById('auto-push')?.value,
                 limit: document.getElementById('auto-limit')?.value
             };
+            envPush = config.auto.push;
+            envLimit = config.auto.limit;
         } else if (editingTab === 'saver') {
             config.saver = {
                 push: document.getElementById('saver-push')?.value,
                 limit: document.getElementById('saver-limit')?.value
             };
+            envPush = config.saver.push;
+            envLimit = config.saver.limit;
         }
 
-        // Write overlay + notify daemon
+        // Daemon reads profile_active.env (simple KEY=VALUE — no jq needed)
+        const env = [
+            `PROFILE=${editingTab}`,
+            envPush ? `PUSH=${envPush}` : '',
+            envLimit ? `LIMIT=${envLimit}` : '',
+            envStep ? `STEP=${envStep}` : '',
+            envChg ? `CHARGING_MA=${envChg}` : '',
+            `UPDATED=${Math.floor(Date.now() / 1000)}`
+        ].filter(Boolean).join('\n') + '\n';
+
+        const envPath = PROFILE_ENV;
+        await ksExec(`printf '%s' '${env.replace(/'/g, "'\\''")}' > "${envPath}" 2>/dev/null`);
+        await ksExec(`echo '${editingTab}' > "${PROFILE_REQUEST}" 2>/dev/null`);
+        await ksExec(`echo '${editingTab}' > "/data/adb/modules/thermalguard/state/profile_request" 2>/dev/null`);
+
+        // Also keep JSON overlay for future use
         const overlayPath = '/data/adb/thermalguard/config/profile_overlays.json';
         const json = JSON.stringify(config, null, 2).replace(/'/g, "'\\''");
         await ksExec(`printf '%s' '${json}' > "${overlayPath}" 2>/dev/null`);
-        await ksExec(`echo '${editingTab}' > "/data/adb/thermalguard/state/profile_request" 2>/dev/null`);
 
         showToast('Profile saved');
     };
 
     function loadProfileEditor() {
-        // Values already in HTML defaults; could load from config via readFile
-        // Minimal: just ensure active tab panel is shown
         switchProfileTab(editingTab);
     }
 
@@ -573,18 +519,23 @@
 
     // ── Share logs ──
     window.shareLogs = async function () {
-        const logs = await readSmart(DAEMON_LOG);
+        const logs = await ksExec(`tail -n 60 "${DAEMON_LOG}" 2>/dev/null`);
         const sensors = await readSmart(SENSORS_LOG);
         const status = await readStatusRaw();
         const soc = await readSmart(`${STATE_DIR}/soc_id`);
         const hb = await readSmart(`${STATE_DIR}/heartbeat`);
+        const env = await readSmart(PROFILE_ENV);
 
         const bundle = [
             '=== ThermalGuard Support Log ===',
             `Generated: ${new Date().toISOString()}`,
             `status source: ${lastStatusSource || 'none'}`,
+            `bridge: ${bridgeInfo()}`,
             `heartbeat: ${hb || 'n/a'}`,
             `SoC id: ${soc || 'unknown'}`,
+            '',
+            '--- profile_active.env ---',
+            env || '(empty)',
             '',
             '--- status.json ---',
             status || '(empty)',
@@ -592,8 +543,8 @@
             '--- logs/sensors.txt ---',
             sensors || '(empty)',
             '',
-            '--- logs/daemon.log (last 60 lines) ---',
-            logs ? String(logs).split('\n').slice(-60).join('\n') : '(empty)',
+            '--- logs/daemon.log (tail 60) ---',
+            logs || '(empty)',
             '',
             '--- device ---',
             `UA: ${navigator.userAgent}`,
@@ -633,7 +584,6 @@
             return;
         }
 
-        // Get zone colors for thresholds
         const colors = {
             normal: '#2FA79B',
             push: '#EFAE2D',
@@ -646,7 +596,6 @@
         const maxTemp = Math.max(...temps, 50);
         const range = maxTemp - minTemp || 1;
 
-        // Draw threshold lines
         ctx.strokeStyle = 'rgba(47, 167, 155, 0.2)';
         ctx.lineWidth = 1;
         ctx.setLineDash([4, 4]);
@@ -667,7 +616,6 @@
         }
         ctx.setLineDash([]);
 
-        // Draw temperature line
         ctx.beginPath();
         ctx.strokeStyle = colors[currentZone] || colors.normal;
         ctx.lineWidth = 2;
@@ -682,7 +630,6 @@
         }
         ctx.stroke();
 
-        // Fill under curve
         ctx.lineTo(w, h);
         ctx.lineTo(0, h);
         ctx.closePath();
@@ -696,7 +643,6 @@
         if (!toast) return;
         toast.textContent = msg;
         toast.classList.remove('hidden');
-        // Force reflow for transition
         void toast.offsetWidth;
         toast.classList.add('show');
 
@@ -708,7 +654,6 @@
 
     // ── Init ──
     function init() {
-        // Immediate poll + periodic
         pollStatus();
         loadProfileEditor();
         pollTimer = setInterval(pollStatus, 2000);
@@ -719,15 +664,13 @@
             gauge.setAttribute('aria-label', 'Temperature gauge');
         }
 
-        // If still empty after 6s, show explicit error (not silent "Waiting…")
         setTimeout(() => {
             if (!statusData) {
-                renderStatusError('No data after 6s. Check module v1.0.5+ and WebUI bridge (KernelSU/APatch).');
+                renderStatusError('Tidak ada data setelah 6 dtk (' + bridgeInfo() + ').');
             }
         }, 6000);
     }
 
-    // Wait for DOM
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {

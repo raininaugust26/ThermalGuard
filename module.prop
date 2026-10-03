@@ -1,7 +1,7 @@
 id=thermalguard
 name=ThermalGuard
-version=v1.0.6
-versionCode=10006
+version=v1.0.7
+versionCode=10007
 author=RainInAugust26
-description=Graduated thermal throttling with emergency failsafe. v1.0.6: hysteresis only on downgrade, stage bin/config, robust temp reads, profile without jq. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
+description=Graduated thermal throttling with emergency failsafe. v1.0.7: official KernelSU exec bridge + profile env overrides. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
 updateJson=
