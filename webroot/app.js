@@ -5,11 +5,10 @@
 (function () {
     'use strict';
 
-    // ── Module paths (try several — WebUI bridge path rules vary) ──
-    const STATUS_PATHS = [
-        '/data/adb/thermalguard/status.json',
-        '/data/adb/modules/thermalguard/status.json'
-    ];
+    // ── Module paths ──
+    const DATA_STATUS = '/data/adb/thermalguard/status.json';
+    const MOD_STATUS = '/data/adb/modules/thermalguard/status.json';
+    const WEB_STATUS = 'status.json'; // relative to webroot (KSU sandbox-friendly)
     const STATE_DIR = '/data/adb/thermalguard/state';
     const PROFILE_REQUEST = `${STATE_DIR}/profile_request`;
     const HISTORY_FILE = `${STATE_DIR}/history.log`;
@@ -27,71 +26,100 @@
     // ── State ──
     let currentZone = 'normal';
     let prevZone = 'normal';
-    let tempHistory = [];   // [{t: epochSec, temp: c}]
+    let tempHistory = [];
     let statusData = null;
     let pollTimer = null;
     let activeProfile = 'auto';
     let readOnlyMode = false;
+    let lastStatusSource = '';
 
-    // ── WebUI bridge (KernelSU / APatch) ──
-    // These functions are provided by the host manager.
-    // Fallbacks attempt direct file access via fetch (works in some contexts).
+    // ── WebUI bridge ──
+    function normalizeExecResult(res) {
+        if (res == null) return '';
+        if (typeof res === 'string') return res;
+        if (typeof res === 'object') {
+            return res.stdout || res.output || res.data || res.result || '';
+        }
+        return String(res);
+    }
 
     function ksExec(cmd) {
         return new Promise((resolve) => {
             if (typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function') {
-                window.ksu.exec(cmd, (res) => resolve(res));
+                window.ksu.exec(cmd, (res) => resolve(normalizeExecResult(res)));
             } else if (typeof window.ap !== 'undefined' && typeof window.ap.exec === 'function') {
-                window.ap.exec(cmd, (res) => resolve(res));
+                window.ap.exec(cmd, (res) => resolve(normalizeExecResult(res)));
             } else {
-                resolve(null);
+                resolve('');
             }
         });
     }
 
     function ksReadFile(path) {
         return new Promise((resolve) => {
-            if (typeof window.ksu !== 'undefined' && typeof window.ksu.readFile === 'function') {
-                window.ksu.readFile(path, (res) => resolve(res));
-            } else if (typeof window.ap !== 'undefined' && typeof window.ap.readFile === 'function') {
-                window.ap.readFile(path, (res) => resolve(res));
-            } else {
-                resolve(null);
+            try {
+                if (typeof window.ksu !== 'undefined' && typeof window.ksu.readFile === 'function') {
+                    window.ksu.readFile(path, (res) => resolve(res == null ? '' : String(res)));
+                } else if (typeof window.ap !== 'undefined' && typeof window.ap.readFile === 'function') {
+                    window.ap.readFile(path, (res) => resolve(res == null ? '' : String(res)));
+                } else {
+                    resolve('');
+                }
+            } catch (e) {
+                resolve('');
             }
         });
     }
 
-    function ksWriteFile(path, content) {
-        return new Promise((resolve) => {
-            if (typeof window.ksu !== 'undefined' && typeof window.ksu.writeFile === 'function') {
-                window.ksu.writeFile(path, content, () => resolve(true));
-            } else if (typeof window.ap !== 'undefined' && typeof window.ap.writeFile === 'function') {
-                window.ap.writeFile(path, content, () => resolve(true));
-            } else {
-                resolve(false);
-            }
-        });
+    function looksLikeStatus(text) {
+        if (!text) return false;
+        const t = String(text).trim();
+        return t.length > 20 && t.indexOf('"module"') !== -1 && t.indexOf('{') === 0;
     }
 
-    // ── Navigation ──
-    window.navigateTo = function (screen) {
-        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    /**
+     * Read a file with multiple strategies:
+     * 1) webroot-relative (KernelSU sandbox)
+     * 2) root `cat` via ksu.exec / ap.exec  ← main path for /data/adb/*
+     * 3) readFile absolute (some managers allow it)
+     */
+    async function readSmart(path) {
+        // Prefer webroot copy for status.json
+        if (path === DATA_STATUS || path === MOD_STATUS) {
+            const rel = await ksReadFile(WEB_STATUS);
+            if (looksLikeStatus(rel)) {
+                lastStatusSource = 'webroot';
+                return rel;
+            }
+            const viaExec = await ksExec(`cat "${path}" 2>/dev/null`);
+            if (looksLikeStatus(viaExec)) {
+                lastStatusSource = 'exec:' + path;
+                return viaExec;
+            }
+            const abs = await ksReadFile(path);
+            if (looksLikeStatus(abs)) {
+                lastStatusSource = 'readFile:' + path;
+                return abs;
+            }
+            return '';
+        }
 
-        const target = document.getElementById(`screen-${screen}`);
-        const navBtn = document.querySelector(`.nav-btn[data-screen="${screen}"]`);
-        if (target) target.classList.add('active');
-        if (navBtn) navBtn.classList.add('active');
+        const viaExec = await ksExec(`cat "${path}" 2>/dev/null`);
+        if (viaExec && String(viaExec).trim().length > 0) return viaExec;
+        const abs = await ksReadFile(path);
+        return abs || '';
+    }
 
-        if (screen === 'security') loadHistory();
-        if (screen === 'profiles') loadProfileEditor();
-    };
-
-    // ── Status polling ──
     async function readStatusRaw() {
-        for (const path of STATUS_PATHS) {
-            const raw = await ksReadFile(path);
-            if (raw && String(raw).trim().length > 2) return raw;
+        for (const path of [DATA_STATUS, MOD_STATUS]) {
+            const raw = await readSmart(path);
+            if (looksLikeStatus(raw)) return raw;
+        }
+        // Last resort: any JSON-ish body from exec
+        const any = await ksExec(`cat "${DATA_STATUS}" "${MOD_STATUS}" 2>/dev/null`);
+        if (looksLikeStatus(any)) {
+            lastStatusSource = 'exec:concat';
+            return any;
         }
         return null;
     }
@@ -100,7 +128,7 @@
         try {
             const raw = await readStatusRaw();
             if (!raw) {
-                renderStatusError('No status.json found. Is the module installed and booted?');
+                renderStatusError('No status.json. Install v1.0.4+, reboot, open WebUI again.');
                 return;
             }
             const data = JSON.parse(raw);
@@ -125,10 +153,12 @@
         const d = document.getElementById('diag-daemon');
         if (d) {
             d.textContent = 'offline';
-            d.className = 'zone-critical';
+            d.className = 'diag-bad';
         }
         const s = document.getElementById('diag-sensors');
         if (s) s.innerHTML = `<div class="diag-empty">${escapeHtml(msg)}</div>`;
+        const src = document.getElementById('diag-source');
+        if (src) src.textContent = lastStatusSource || 'none';
         const gt = document.getElementById('gauge-temp');
         if (gt) {
             gt.textContent = '--°';
@@ -137,6 +167,25 @@
         const gz = document.getElementById('gauge-zone');
         if (gz) gz.textContent = 'No data';
     }
+
+    function ksWriteFile(path, content) {
+        // Prefer root echo via exec (KSU writeFile may be sandboxed)
+        return ksExec(`printf '%s' '${String(content).replace(/'/g, "'\\''")}' > "${path}"`);
+    }
+
+    // ── Navigation ──
+    window.navigateTo = function (screen) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+
+        const target = document.getElementById(`screen-${screen}`);
+        const navBtn = document.querySelector(`.nav-btn[data-screen="${screen}"]`);
+        if (target) target.classList.add('active');
+        if (navBtn) navBtn.classList.add('active');
+
+        if (screen === 'security') loadHistory();
+        if (screen === 'profiles') loadProfileEditor();
+    };
 
     function renderStatus(data) {
         // SoC badge
@@ -299,6 +348,9 @@
             updated.textContent = lu > 0 ? `${age >= 0 ? age : '?'}s ago` : 'never';
         }
 
+        const srcEl = document.getElementById('diag-source');
+        if (srcEl) srcEl.textContent = lastStatusSource || '—';
+
         if (!list) return;
         const sensors = data.sensors;
         if (!sensors) {
@@ -353,12 +405,9 @@
         activeProfile = profile;
         updateProfileButtons(profile);
 
-        // Write profile request
-        await ksWriteFile(PROFILE_REQUEST, profile);
-
-        // Also try direct write via exec
-        const cmd = `echo '${profile}' > ${PROFILE_REQUEST}`;
-        await ksExec(cmd);
+        // Write profile request via root shell
+        await ksExec(`echo '${profile}' > "${PROFILE_REQUEST}" 2>/dev/null`);
+        await ksExec(`echo '${profile}' > "/data/adb/modules/thermalguard/state/profile_request" 2>/dev/null`);
 
         showToast('Profile saved');
     };
@@ -418,13 +467,11 @@
             };
         }
 
-        // Write to profiles.json via exec (merge approach: write overlay file)
+        // Write overlay + notify daemon
         const overlayPath = '/data/adb/thermalguard/config/profile_overlays.json';
-        const json = JSON.stringify(config, null, 2);
-        await ksWriteFile(overlayPath, json);
-
-        // Notify daemon to reload
-        await ksExec(`echo '${editingTab}' > ${STATE_DIR}/profile_request`);
+        const json = JSON.stringify(config, null, 2).replace(/'/g, "'\\''");
+        await ksExec(`printf '%s' '${json}' > "${overlayPath}" 2>/dev/null`);
+        await ksExec(`echo '${editingTab}' > "/data/adb/thermalguard/state/profile_request" 2>/dev/null`);
 
         showToast('Profile saved');
     };
@@ -441,21 +488,20 @@
         if (!container) return;
 
         try {
-            const raw = await ksReadFile(HISTORY_FILE);
+            const raw = await readSmart(HISTORY_FILE);
             if (!raw) {
                 container.innerHTML = '<div class="history-empty">No events yet.</div>';
                 return;
             }
 
-            const lines = raw.trim().split('\n').slice(-20).reverse();
-            if (lines.length === 0) {
+            const lines = String(raw).trim().split('\n').slice(-20).reverse();
+            if (lines.length === 0 || (lines.length === 1 && !lines[0])) {
                 container.innerHTML = '<div class="history-empty">No events yet.</div>';
                 return;
             }
 
             let html = '';
             lines.forEach(line => {
-                // Format: "2026-10-03 21:14:05 push -> limit temp=43C reason=temp_threshold"
                 const parts = line.split(' ');
                 const time = parts.length >= 3 ? parts[1].substring(0, 5) : '--:--';
                 const rest = parts.slice(2).join(' ');
@@ -478,14 +524,17 @@
 
     // ── Share logs ──
     window.shareLogs = async function () {
-        const logs = await ksReadFile(DAEMON_LOG);
-        const sensors = await ksReadFile(SENSORS_LOG);
+        const logs = await readSmart(DAEMON_LOG);
+        const sensors = await readSmart(SENSORS_LOG);
         const status = await readStatusRaw();
-        const soc = await ksReadFile(`${STATE_DIR}/soc_id`);
+        const soc = await readSmart(`${STATE_DIR}/soc_id`);
+        const hb = await readSmart(`${STATE_DIR}/heartbeat`);
 
         const bundle = [
             '=== ThermalGuard Support Log ===',
             `Generated: ${new Date().toISOString()}`,
+            `status source: ${lastStatusSource || 'none'}`,
+            `heartbeat: ${hb || 'n/a'}`,
             `SoC id: ${soc || 'unknown'}`,
             '',
             '--- status.json ---',
@@ -494,8 +543,8 @@
             '--- logs/sensors.txt ---',
             sensors || '(empty)',
             '',
-            '--- logs/daemon.log (last 50 lines) ---',
-            logs ? logs.split('\n').slice(-50).join('\n') : '(empty)',
+            '--- logs/daemon.log (last 60 lines) ---',
+            logs ? String(logs).split('\n').slice(-60).join('\n') : '(empty)',
             '',
             '--- device ---',
             `UA: ${navigator.userAgent}`,

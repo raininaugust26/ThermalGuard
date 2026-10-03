@@ -714,9 +714,23 @@ update_status() {
 EOF
 )
 
-    # Atomic-ish write to both locations (WebUI bridge path compatibility)
-    echo "${body}" > "${STATUS_FILE}.tmp" 2>/dev/null && mv "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null
-    echo "${body}" > "/data/adb/modules/thermalguard/status.json" 2>/dev/null
+    # Atomic-ish write to multiple locations
+    # 1) Data dir  2) Module dir  3) webroot (KernelSU WebUI readFile sandbox)
+    local webroot="/data/adb/modules/thermalguard/webroot"
+    local ok_data="fail" ok_mod="fail" ok_web="fail"
+    if echo "${body}" > "${STATUS_FILE}.tmp" 2>/dev/null; then
+        mv "${STATUS_FILE}.tmp" "${STATUS_FILE}" 2>/dev/null && ok_data="ok"
+    fi
+    if echo "${body}" > "/data/adb/modules/thermalguard/status.json" 2>/dev/null; then
+        ok_mod="ok"
+    fi
+    mkdir -p "${webroot}" 2>/dev/null
+    if echo "${body}" > "${webroot}/status.json" 2>/dev/null; then
+        ok_web="ok"
+    fi
+    # Heartbeat for debugging (UI/exec can read without full JSON parse)
+    echo "${now}" > "${TG_STATE}/heartbeat" 2>/dev/null
+    echo "${now} status write data=${ok_data} mod=${ok_mod} web=${ok_web} zone=${zone} cpu=${cpu_n} batt=${batt_n}" >> "${DAEMON_LOG}" 2>/dev/null
 }
 
 # ─── Clear boot marker (successful boot) ───────────────────────────
@@ -743,6 +757,9 @@ main() {
     log "Sensors: cpu=${CPU_TEMP_PATH:-none}(${CPU_TEMP_TYPE:-n/a}) gpu=${GPU_TEMP_PATH:-none}(${GPU_TEMP_TYPE:-n/a}) skin=${SKIN_TEMP_PATH:-none}(${SKIN_TEMP_TYPE:-n/a}) batt=${BATT_NODE}"
     log "Regex cpu='${SOC_CPU_TYPE_REGEX}' gpu='${SOC_GPU_TYPE_REGEX}' skin='${SOC_SKIN_TYPE_REGEX}'"
     log "Zone ref: battery preferred (PRD device temp); CPU/GPU die only for 85C abs limit"
+
+    # Seed status immediately so WebUI is never stuck on install-time zeros
+    update_status "normal" "0" "0" "0" "0" "0"
 
     while true; do
         # Check lockout (failsafe active)
@@ -853,7 +870,9 @@ main() {
         fi
 
         # ── Update status ──
-        update_status "${new_zone}" "${dev_temp:-0}" "${cpu_temp:-0}" "${gpu_temp:-0}" "${batt_temp:-0}" "${skin_temp:-0}"
+        if ! update_status "${new_zone}" "${dev_temp:-0}" "${cpu_temp:-0}" "${gpu_temp:-0}" "${batt_temp:-0}" "${skin_temp:-0}"; then
+            log "update_status returned error (zone=${new_zone})"
+        fi
 
         # Health check: daemon produced status → clear boot marker (anti-bootloop)
         if [ "${TG_FIRST_HEALTHY}" != "1" ] && [ -f "${STATUS_FILE}" ]; then

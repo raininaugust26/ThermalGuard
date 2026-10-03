@@ -1,7 +1,7 @@
 id=thermalguard
 name=ThermalGuard
-version=v1.0.3
-versionCode=10003
+version=v1.0.4
+versionCode=10004
 author=RainInAugust26
-description=Graduated thermal throttling with emergency failsafe. v1.0.3: fix SoC conf quote parsing, hottest CPU/GPU zones, battery-first zone ref. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
+description=Graduated thermal throttling with emergency failsafe. v1.0.4: WebUI reads status via root exec + webroot copy. Requires Magisk 24+, KernelSU, or APatch. arm64 only.
 updateJson=
