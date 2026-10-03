@@ -1,0 +1,47 @@
+#!/sbin/sh
+# ThermalGuard — Magisk-compatible module installer (offline stub)
+# Used when CI cannot download topjohnwu/Magisk module_installer.sh.
+# Extracts module files to /data/adb/modules/thermalguard and runs customize.sh.
+
+umask 022
+
+OUTFD="$2"
+ZIPFILE="$3"
+
+ui_print() {
+    if [ -n "${OUTFD}" ]; then
+        echo "ui_print $1" > /proc/self/fd/"${OUTFD}"
+        echo "ui_print" > /proc/self/fd/"${OUTFD}"
+    else
+        echo "$1"
+    fi
+}
+
+ui_print "- ThermalGuard installer (offline stub)"
+ui_print "- Extracting module..."
+
+TMP="/dev/tmp/tg_install_$$"
+rm -rf "${TMP}" 2>/dev/null
+mkdir -p "${TMP}" 2>/dev/null || TMP="/data/local/tmp/tg_install_$$"
+mkdir -p "${TMP}" || exit 1
+
+cd "${TMP}" || exit 1
+unzip -o "${ZIPFILE}" -x "META-INF/*" -d "${TMP}" >/dev/null 2>&1
+if [ ! -f "${TMP}/module.prop" ]; then
+    ui_print "! module.prop missing in zip"
+    exit 1
+fi
+
+MODROOT="/data/adb/modules/thermalguard"
+mkdir -p "${MODROOT}" 2>/dev/null || exit 1
+cp -a "${TMP}"/. "${MODROOT}/" 2>/dev/null
+rm -rf "${TMP}" 2>/dev/null
+
+if [ -f "${MODROOT}/customize.sh" ]; then
+    ui_print "- Running customize.sh..."
+    sh "${MODROOT}/customize.sh"
+fi
+
+ui_print "- ThermalGuard installed."
+ui_print "- Reboot to activate."
+exit 0

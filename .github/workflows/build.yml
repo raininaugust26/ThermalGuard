@@ -55,11 +55,35 @@ jobs:
              LICENSE README.md "$STAGE/"
           cp -a bin config soc webroot "$STAGE/"
 
-          # Magisk-compatible META-INF (KernelSU/APatch also accept this layout)
+          # Magisk-compatible META-INF — prefer vendored copy (no network required)
           mkdir -p "$STAGE/META-INF/com/google/android"
-          curl -fsSL -o "$STAGE/META-INF/com/google/android/update-binary" \
-            https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh
-          printf '%s\n' '#MAGISK' > "$STAGE/META-INF/com/google/android/updater-script"
+          if [ -f ".github/release/META-INF/com/google/android/update-binary" ]; then
+            cp .github/release/META-INF/com/google/android/update-binary \
+               "$STAGE/META-INF/com/google/android/update-binary"
+            cp .github/release/META-INF/com/google/android/updater-script \
+               "$STAGE/META-INF/com/google/android/updater-script"
+            echo "META-INF: vendored stub (offline)"
+          else
+            printf '%s\n' '#MAGISK' > "$STAGE/META-INF/com/google/android/updater-script"
+            echo '#!/sbin/sh' > "$STAGE/META-INF/com/google/android/update-binary"
+            echo 'exit 0' >> "$STAGE/META-INF/com/google/android/update-binary"
+            echo "META-INF: generated minimal stub"
+          fi
+          chmod 755 "$STAGE/META-INF/com/google/android/update-binary" 2>/dev/null || true
+
+          # Optional: try official Magisk installer (best effort, never fail build)
+          if curl -fsSL --connect-timeout 8 --max-time 20 \
+              -o "${RUNNER_TEMP}/magisk_installer.sh" \
+              https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh; then
+            if [ -s "${RUNNER_TEMP}/magisk_installer.sh" ]; then
+              cp "${RUNNER_TEMP}/magisk_installer.sh" \
+                 "$STAGE/META-INF/com/google/android/update-binary"
+              chmod 755 "$STAGE/META-INF/com/google/android/update-binary"
+              echo "META-INF: official Magisk module_installer.sh (downloaded)"
+            fi
+          else
+            echo "META-INF: network fetch skipped/failed — using vendored stub"
+          fi
 
           # Safety: never ship a zip inside the module zip
           find "$STAGE" -name '*.zip' -delete
