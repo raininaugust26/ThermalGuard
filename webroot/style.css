@@ -76,6 +76,7 @@ body {
     display: none;
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: var(--space);
     padding-bottom: calc(var(--nav-height) + var(--space) * 2);
     -webkit-overflow-scrolling: touch;
@@ -96,13 +97,9 @@ body {
 .header-left {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    min-width: 0;
     gap: var(--space);
-}
-
-.header-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
 }
 
 .app-title {
@@ -110,17 +107,6 @@ body {
     font-size: 20px;
     font-weight: 700;
     letter-spacing: -0.02em;
-}
-
-.soc-badge {
-    font-family: var(--font-display);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--accent);
-    background: rgba(108, 195, 221, 0.12);
-    padding: 4px 10px;
-    border-radius: 20px;
-    border: 1px solid rgba(108, 195, 221, 0.2);
 }
 
 /* ── Pills ── */
@@ -353,6 +339,12 @@ body {
     justify-content: space-between;
     align-items: center;
     margin-bottom: 12px;
+}
+
+.diag-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .diag-title {

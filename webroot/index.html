@@ -31,11 +31,6 @@
                     <h1 class="app-title">ThermalGuard</h1>
                     <span id="status-pill" class="pill pill-active">Active</span>
                 </div>
-                <div class="header-actions">
-                    <div id="soc-badge" class="soc-badge">SoC</div>
-                    <button class="btn-sm" onclick="shareLogs()">Logs</button>
-                    <button class="btn-sm" onclick="refreshStatus()">Refresh</button>
-                </div>
             </header>
 
             <!-- Read-only warning -->
@@ -89,7 +84,10 @@
             <div class="diag-container" id="diag-panel">
                 <div class="diag-header">
                     <span class="diag-title">Diagnostics</span>
-                    <button class="btn-sm" onclick="refreshStatus()">Refresh</button>
+                    <div class="diag-actions">
+                        <button class="btn-sm" onclick="shareLogs()">Logs</button>
+                        <button class="btn-sm" onclick="refreshStatus()">Refresh</button>
+                    </div>
                 </div>
                 <div class="diag-grid">
                     <div class="diag-item">
@@ -268,7 +266,7 @@
                         <span class="sec-label">Hard Battery Limit</span>
                         <span class="sec-value">48°C</span>
                     </div>
-                    <span class="lock-badge">🔒 Locked</span>
+                    <span class="lock-badge">Locked</span>
                 </div>
                 <p class="sec-note">Cannot be raised. Exceeding this forces failsafe.</p>
             </div>
@@ -279,7 +277,7 @@
                         <span class="sec-label">Hard CPU/GPU Die Limit</span>
                         <span class="sec-value">85°C</span>
                     </div>
-                    <span class="lock-badge">🔒 Locked</span>
+                    <span class="lock-badge">Locked</span>
                 </div>
                 <p class="sec-note">Cannot be raised. Exceeding this forces failsafe.</p>
             </div>
