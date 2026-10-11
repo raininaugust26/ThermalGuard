@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag rilis (mis. v1.0.1). Dibuat otomatis jika belum ada.'
+        required: true
+      prerelease:
+        description: 'Tandai sebagai pre-release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) TAG="v${TAG}" ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Release tag: ${TAG}"
+
+      - name: Stage module files
+        run: |
+          set -euo pipefail
+          STAGE="${RUNNER_TEMP}/stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+
+          cp module.prop customize.sh post-fs-data.sh service.sh sepolicy.rule \
+             LICENSE README.md "$STAGE/"
+          cp -a bin config soc webroot "$STAGE/"
+
+          # META-INF (pakai versi vendored jika ada)
+          META="$STAGE/META-INF/com/google/android"
+          mkdir -p "$META"
+          if [ -f ".github/release/META-INF/com/google/android/update-binary" ]; then
+            cp .github/release/META-INF/com/google/android/update-binary "$META/"
+            cp .github/release/META-INF/com/google/android/updater-script "$META/"
+          else
+            echo '#MAGISK' > "$META/updater-script"
+            printf '#!/sbin/sh\nexit 0\n' > "$META/update-binary"
+          fi
+          chmod 755 "$META/update-binary"
+
+          find "$STAGE" -name '*.zip' -delete
+
+      - name: Create zip
+        id: zip
+        run: |
+          set -euo pipefail
+          ZIP_NAME="ThermalGuard-${{ steps.ver.outputs.tag }}.zip"
+          OUT="${GITHUB_WORKSPACE}/${ZIP_NAME}"
+          (cd "${RUNNER_TEMP}/stage" && zip -r -9 "$OUT" .)
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+          unzip -l "$OUT"
+
+      - name: Verify zip structure
+        run: |
+          set -euo pipefail
+          LIST=$(unzip -Z1 "${{ steps.zip.outputs.zip_name }}" | sed 's|^\./||')
+
+          printf '%s\n' "$LIST" | grep -qx 'module.prop' \
+            || { echo "::error::module.prop tidak ada di root zip"; exit 1; }
+
+          if printf '%s\n' "$LIST" | grep -Ei '\.zip$'; then
+            echo "::error::Ada zip bersarang di dalam zip"; exit 1
+          fi
+
+          for f in customize.sh service.sh post-fs-data.sh; do
+            printf '%s\n' "$LIST" | grep -qx "$f" \
+              || { echo "::error::File wajib hilang: $f"; exit 1; }
+          done
+
+          echo "Struktur zip OK"
+
+      - name: Checksum
+        id: sum
+        run: |
+          set -euo pipefail
+          ZIP_NAME="${{ steps.zip.outputs.zip_name }}"
+          sha256sum "$ZIP_NAME" > "${ZIP_NAME}.sha256"
+          cat "${ZIP_NAME}.sha256"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ThermalGuard ${{ steps.ver.outputs.tag }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.zip.outputs.zip_name }}
+            ${{ steps.zip.outputs.zip_name }}.sha256
+          body: |
+            ## ThermalGuard ${{ steps.ver.outputs.tag }}
+
+            ### Instalasi
+            1. Download `${{ steps.zip.outputs.zip_name }}`
+            2. Flash lewat Magisk / KernelSU / APatch
+            3. Reboot
+
+            ### Keamanan
+            - Batas keras: CPU/GPU 85°C, baterai 48°C
+            - Fail-safe mengembalikan nilai stock; modul terkunci 5 menit setelah Critical
